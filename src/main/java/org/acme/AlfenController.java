@@ -5,7 +5,10 @@ import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.BadRequestException;
+import org.acme.data.Categories;
 import org.acme.data.Login;
+import org.acme.data.PropertyCatRsp;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,6 +25,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.util.Optional;
 
 @ApplicationScoped
 public class AlfenController {
@@ -42,6 +46,9 @@ public class AlfenController {
         login();
     }
 
+    private HttpClient httpClient;
+    private Categories categoriesCache;
+
     private void login() {
         try {
             LOG.info("Login");
@@ -53,7 +60,6 @@ public class AlfenController {
             }
             Login login = new Login(username, password, "alfen-mqtt");
             String loginStr = objectMapper.writeValueAsString(login);
-            LOG.info("login: {}", loginStr);
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(new URI("https://" + endpoint + "/api/login"))
                     .headers("Content-Type", "application/json")
@@ -63,30 +69,89 @@ public class AlfenController {
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(null, new TrustManager[]{trustManager}, SecureRandom.getInstanceStrong());
 
-            HttpClient client = HttpClient.newBuilder()
+            httpClient = HttpClient.newBuilder()
                     .sslContext(sslContext)
                     .build();
 
-            HttpResponse<String> response = client
+            HttpResponse<String> response = httpClient
                     .send(request, HttpResponse.BodyHandlers.ofString());
-            LOG.info("RSP: {} -- {}", response.statusCode(), response.body());
+            /*LOG.info("RSP: {} -- {}", response.statusCode(), response.body());
             response.headers().map().forEach((k,v) -> {
                 LOG.info("H: {}: {}", k, v);
-            });
+            });*/
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                LOG.info("Login OK");
+            } else {
+                LOG.warn("Login error");
+                LOG.info("RSP: {} -- {}", response.statusCode(), response.body());
+                response.headers().map().forEach((k, v) -> {
+                    LOG.info("H: {}: {}", k, v);
+                });
+                reset();
+            }
 
-            HttpRequest request2 = HttpRequest.newBuilder()
-                    .uri(new URI("https://" + endpoint + "/api/categories"))
-                    .GET().build();
-            HttpResponse<String> response2 = client.send(request2, HttpResponse.BodyHandlers.ofString());
-            LOG.info("RSP2: {} -- {}", response2.statusCode(), response2.body());
-            response2.headers().map().forEach((k,v) -> {
-                LOG.info("H: {}: {}", k, v);
-            });
 
         } catch (Exception e) {
-            LOG.error("kapot", e);
-            throw new RuntimeException(e);
+            LOG.error("Error executing login", e);
         }
+    }
+
+    private void reset() {
+        httpClient = null;
+        categoriesCache = null;
+    }
+
+    private boolean checkLogin() {
+        if (httpClient == null) {
+            login();
+        }
+        return httpClient != null;
+    }
+
+    private <T> Optional<T> getData(Class<T> valueType, String urlPath) {
+        try {
+            URI uri = new URI("https://" + endpoint + "/api/" + urlPath);
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(uri)
+                    .GET().build();
+
+            HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                LOG.info("RSP: {} -- {}", response.statusCode(), new String(response.body()));
+                return Optional.of(objectMapper.readValue(response.body(), valueType));
+            } else {
+                LOG.warn("Error fetching {}: http {}\n{}", uri, response.statusCode(), new String(response.body()));
+                return Optional.empty();
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Can't fetch " + urlPath, e);
+        }
+    }
+
+    public Optional<Categories> getCategories() {
+        if (categoriesCache != null) {
+            return Optional.of(categoriesCache);
+        }
+        getData(Categories.class, "categories").ifPresent(it -> categoriesCache = it);
+        return Optional.of(categoriesCache);
+    }
+
+    public Optional<PropertyCatRsp> getProperties(String category) {
+        if (!checkLogin()) {
+            return Optional.empty();
+        }
+        Optional<Categories> categories = getCategories();
+        if (categories.filter(cat -> cat.categories().contains(category)).isEmpty()) {
+            throw new BadRequestException("Unknown category " + category + " valid: " +
+                    categories.map(cat -> String.join(",", cat.categories())).orElse("[N/A]"));
+        }
+
+
+        Optional<PropertyCatRsp> data1 = getData(PropertyCatRsp.class, "prop?cat=" + category );
+        Optional<PropertyCatRsp> data = getData(PropertyCatRsp.class, "prop?cat=" + category + "&offset=32");
+
+        return Optional.empty();
     }
 
     TrustManager trustManager = new X509ExtendedTrustManager() {
