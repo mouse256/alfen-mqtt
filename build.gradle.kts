@@ -20,6 +20,10 @@ dependencies {
     //implementation("io.quarkus:quarkus-rest-client-jackson")
     testImplementation("io.quarkus:quarkus-junit5")
     testImplementation("io.rest-assured:rest-assured")
+    //testImplementation("io.quarkiverse.mockserver:quarkus-mockserver")
+    //testImplementation("io.quarkiverse.mockserver:quarkus-mockserver-test:1.2.0")
+    testImplementation("io.vertx:vertx-web")
+    testImplementation("io.quarkus:quarkus-vertx")
 }
 
 group = "org.acme"

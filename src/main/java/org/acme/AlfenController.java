@@ -43,7 +43,7 @@ public class AlfenController {
 
     public void onStart(@Observes StartupEvent startupEvent) {
         LOG.info("Startup: endpoint: {}", endpoint);
-        login();
+        //login();
     }
 
     private HttpClient httpClient;
@@ -60,8 +60,10 @@ public class AlfenController {
             }
             Login login = new Login(username, password, "alfen-mqtt");
             String loginStr = objectMapper.writeValueAsString(login);
+            URI uri = new URI(endpoint + "/api/login");
+            LOG.info("Login URI: {}", uri);
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(new URI("https://" + endpoint + "/api/login"))
+                    .uri(uri)
                     .headers("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(loginStr))
                     .build();
@@ -101,21 +103,25 @@ public class AlfenController {
         categoriesCache = null;
     }
 
-    private boolean checkLogin() {
+    private void checkLogin() {
         if (httpClient == null) {
             login();
         }
-        return httpClient != null;
+        if (httpClient == null) {
+            throw new IllegalStateException("Login failed");
+        }
     }
 
     private <T> Optional<T> getData(Class<T> valueType, String urlPath) {
         try {
-            URI uri = new URI("https://" + endpoint + "/api/" + urlPath);
+            URI uri = new URI(endpoint + "/api/" + urlPath);
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(uri)
                     .GET().build();
 
+            LOG.info("GETting {}", uri);
             HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            LOG.info("RSP: {}", response.statusCode());
 
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
                 LOG.info("RSP: {} -- {}", response.statusCode(), new String(response.body()));
@@ -130,6 +136,8 @@ public class AlfenController {
     }
 
     public Optional<Categories> getCategories() {
+        checkLogin();
+
         if (categoriesCache != null) {
             return Optional.of(categoriesCache);
         }
@@ -138,9 +146,7 @@ public class AlfenController {
     }
 
     public Optional<PropertyCatRsp> getProperties(String category) {
-        if (!checkLogin()) {
-            return Optional.empty();
-        }
+        checkLogin();
         Optional<Categories> categories = getCategories();
         if (categories.filter(cat -> cat.categories().contains(category)).isEmpty()) {
             throw new BadRequestException("Unknown category " + category + " valid: " +
