@@ -21,7 +21,6 @@ public class MockAlfenDevice implements AutoCloseable {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private final HttpServer server;
     private final Router router;
-    private Function<RoutingContext, Future<Void>> categoriesFunction;
 
     public MockAlfenDevice(Vertx vertx, int port) {
         try {
@@ -45,9 +44,12 @@ public class MockAlfenDevice implements AutoCloseable {
     }
 
     public void setCategoriesFunction(Function<RoutingContext, Future<Void>> categoriesFunction) {
-        this.categoriesFunction = categoriesFunction;
         router.get("/api/categories")
                 .respond(categoriesFunction);
+    }
+    public void setPropertiesFunction(Function<RoutingContext, Future<Void>> propertiesFunction) {
+        router.get("/api/prop")
+                .respond(propertiesFunction);
     }
 
     @Override
