@@ -113,7 +113,7 @@ public class ResourceTest {
     public void testCategories() throws JsonProcessingException {
         String cats = objectMapper.writeValueAsString(dummyCategories);
         given()
-                .when().get("/api/categories")
+                .when().get("/alfen/alfen1/categories")
                 .then()
                 .statusCode(200)
                 .body(is(cats));
@@ -122,7 +122,7 @@ public class ResourceTest {
     @Test
     public void testPropertyInvalidCategory() throws JsonProcessingException {
         given()
-                .when().get("/api/properties/invalid")
+                .when().get("/alfen/alfen1/properties/invalid")
                 .then()
                 .statusCode(400);
     }
@@ -133,7 +133,7 @@ public class ResourceTest {
                 List.of(new PropertyParsed(ids.getFirst().value, ids.getFirst().key, "test"));
         String rsp = objectMapper.writeValueAsString(expected);
         given()
-                .when().get("/api/properties/cat2")
+                .when().get("/alfen/alfen1/properties/cat2")
                 .then()
                 .statusCode(200)
                 .body(is(rsp));
@@ -143,7 +143,7 @@ public class ResourceTest {
     public void testPropertyValidCategoryLong() throws JsonProcessingException {
         String rsp = objectMapper.writeValueAsString(propertyCatFull);
         given()
-                .when().get("/api/properties/cat1")
+                .when().get("/alfen/alfen1/properties/cat1")
                 .then()
                 .statusCode(200)
                 .body(is(rsp));

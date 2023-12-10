@@ -16,8 +16,8 @@ public class MockAlfenDeviceResource implements QuarkusTestResourceLifecycleMana
     public Map<String, String> start() {
         LOG.info("Start");
         return Map.of(
-                "alfen.password", "dummy",
-                "alfen.endpoint", "http://127.0.0.7:" + PORT);
+                "alfen.devices[1].password", "dummy",
+                "alfen.devices[1].endpoint", "http://127.0.0.7:" + PORT);
     }
 
     @Override
