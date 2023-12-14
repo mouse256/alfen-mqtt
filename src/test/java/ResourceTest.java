@@ -35,6 +35,7 @@ public class ResourceTest {
     private static List<PropertyParsed> propertyCatFull;
 
     private final Categories dummyCategories = new Categories("v2", List.of("cat1", "cat2"));
+    private static final String VALID_DEVICE = "alfen1";
 
 
     @BeforeAll
@@ -108,12 +109,20 @@ public class ResourceTest {
         });
     }
 
+    @Test
+    public void testCategoriesInvalidDevice() throws JsonProcessingException {
+        String cats = objectMapper.writeValueAsString(dummyCategories);
+        given()
+                .when().get("/alfen/invalid_device/categories")
+                .then()
+                .statusCode(404);
+    }
 
     @Test
     public void testCategories() throws JsonProcessingException {
         String cats = objectMapper.writeValueAsString(dummyCategories);
         given()
-                .when().get("/alfen/alfen1/categories")
+                .when().get("/alfen/" + VALID_DEVICE + "/categories")
                 .then()
                 .statusCode(200)
                 .body(is(cats));
@@ -122,7 +131,7 @@ public class ResourceTest {
     @Test
     public void testPropertyInvalidCategory() throws JsonProcessingException {
         given()
-                .when().get("/alfen/alfen1/properties/invalid")
+                .when().get("/alfen/" + VALID_DEVICE + "/properties/invalid")
                 .then()
                 .statusCode(400);
     }
@@ -133,7 +142,7 @@ public class ResourceTest {
                 List.of(new PropertyParsed(ids.getFirst().value, ids.getFirst().key, "test"));
         String rsp = objectMapper.writeValueAsString(expected);
         given()
-                .when().get("/alfen/alfen1/properties/cat2")
+                .when().get("/alfen/" + VALID_DEVICE + "/properties/cat2")
                 .then()
                 .statusCode(200)
                 .body(is(rsp));
@@ -143,7 +152,7 @@ public class ResourceTest {
     public void testPropertyValidCategoryLong() throws JsonProcessingException {
         String rsp = objectMapper.writeValueAsString(propertyCatFull);
         given()
-                .when().get("/alfen/alfen1/properties/cat1")
+                .when().get("/alfen/" + VALID_DEVICE + "/properties/cat1")
                 .then()
                 .statusCode(200)
                 .body(is(rsp));
