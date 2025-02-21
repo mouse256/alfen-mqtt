@@ -1,8 +1,6 @@
-package org.acme;
+package org.muizenhol.alfen;
 
 import io.smallrye.config.ConfigMapping;
-
-import java.util.List;
 
 @ConfigMapping(prefix = "mqtt")
 public interface MqttConfig {
@@ -11,6 +9,4 @@ public interface MqttConfig {
     int port();
 
     boolean enabled();
-
-    List<String> categories();
 }

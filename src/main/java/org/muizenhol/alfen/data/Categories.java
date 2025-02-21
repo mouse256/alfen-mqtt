@@ -1,4 +1,4 @@
-package org.acme.data;
+package org.muizenhol.alfen.data;
 
 import java.util.List;
 

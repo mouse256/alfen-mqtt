@@ -1,10 +1,10 @@
-package org.acme;
+package org.muizenhol.alfen;
 
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
-import org.acme.data.Categories;
-import org.acme.data.PropertyParsed;
+import org.muizenhol.alfen.data.Categories;
+import org.muizenhol.alfen.data.PropertyParsed;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

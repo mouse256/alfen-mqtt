@@ -1,8 +1,8 @@
-package org.acme;
+package org.muizenhol.alfen;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.acme.data.Categories;
-import org.acme.data.Login;
+import org.muizenhol.alfen.data.Categories;
+import org.muizenhol.alfen.data.Login;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,9 +42,12 @@ public class AlfenConnection {
             if (config.password().isEmpty()) {
                 throw new IllegalArgumentException("password not set for " + config.name());
             }
-            Login login = new Login(config.username(), config.password(), "alfen-mqtt");
+            Login login = new Login(
+                    config.username().orElseThrow(() -> new IllegalArgumentException("username not set for " + config.name())),
+                    config.password().orElseThrow(() -> new IllegalArgumentException("password not set for " + config.name())),
+                    "alfen-mqtt");
             String loginStr = objectMapper.writeValueAsString(login);
-            URI uri = new URI(config.endpoint() + "/api/login");
+            URI uri = new URI("https://" + config.endpoint() + "/api/login");
             LOG.info("Login URI: {}", uri);
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(uri)

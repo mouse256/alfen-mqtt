@@ -1,40 +1,54 @@
-package org.acme;
+package org.muizenhol.alfen;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.runtime.StartupEvent;
+import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.NotFoundException;
-import org.acme.data.Categories;
-import org.acme.data.PropertyCatRsp;
-import org.acme.data.PropertyParsed;
+import org.muizenhol.alfen.data.Categories;
+import org.muizenhol.alfen.data.PropertyCatRsp;
+import org.muizenhol.alfen.data.PropertyParsed;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Properties;
+import java.time.Duration;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class AlfenController {
 
     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+    private static final List<String> CATEGORIES = List.of("meter1", "temp", "generic2");
     @Inject
-    private ObjectMapper objectMapper;
+    ObjectMapper objectMapper;
 
     @Inject
-    private AlfenConfig alfenConfig;
+    AlfenConfig alfenConfig;
+
+    @Inject
+    Vertx vertx;
+
+    @Inject
+    MqttPublisher mqttPublisher;
+
     private Properties ids;
-    private Map<String, AlfenConnection> devices;
+    private Map<String, AlfenConnection> devices = Collections.emptyMap();
 
     public void onStart(@Observes StartupEvent startupEvent) {
-        LOG.info("Startup: endpoints: {}", alfenConfig.devices().stream()
+        List<AlfenConfig.Device> deviceConfig = alfenConfig.devices().stream()
+                .filter(d -> d.type() == AlfenConfig.DeviceType.HTTP)
+                .toList();
+        if (deviceConfig.isEmpty()) {
+            LOG.info("No Alfen HTTP devices configured");
+            return;
+        }
+        LOG.info("Startup: endpoints: {}", deviceConfig.stream()
                 .map(e -> e.name() + ": " + e.endpoint())
                 .collect(Collectors.toList()));
         ids = new Properties();
@@ -47,6 +61,11 @@ public class AlfenController {
         devices = alfenConfig.devices().stream()
                 .collect(Collectors.toMap(AlfenConfig.Device::name,
                         d -> new AlfenConnection(d, objectMapper)));
+
+        vertx.setPeriodic(100, Duration.ofSeconds(5).toMillis(),
+                e -> deviceConfig.forEach(
+                        device -> CATEGORIES.forEach(
+                                category -> poll(device, category))));
     }
 
     private AlfenConnection getConn(String device) {
@@ -104,6 +123,17 @@ public class AlfenController {
             case 8 -> Double.parseDouble(value);
             default -> value;
         };
+    }
+
+    private void poll(AlfenConfig.Device device, String category) {
+        LOG.debug("Polling device {} (category {})", device, category);
+        try {
+            List<PropertyParsed> properties = getProperties(device.name(), category);
+            LOG.debug("Got {} properties", properties.size());
+            mqttPublisher.send(device.name(), category, properties);
+        } catch (Exception e) {
+            LOG.warn("Can't fetch category {} for device {}: {}", category, device, e.getMessage());
+        }
     }
 
 }

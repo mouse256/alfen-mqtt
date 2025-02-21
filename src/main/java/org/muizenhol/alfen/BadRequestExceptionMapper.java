@@ -1,4 +1,4 @@
-package org.acme;
+package org.muizenhol.alfen;
 
 
 import jakarta.ws.rs.BadRequestException;
