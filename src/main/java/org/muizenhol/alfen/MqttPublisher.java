@@ -7,6 +7,7 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.reactive.messaging.Channel;
 import org.eclipse.microprofile.reactive.messaging.Emitter;
 import org.eclipse.microprofile.reactive.messaging.Message;
+import org.muizenhol.alfen.data.Evcc;
 import org.muizenhol.alfen.data.PropertyParsed;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,7 +25,7 @@ public class MqttPublisher {
 
     @Inject
     @Channel("properties")
-    private Emitter<Object> emitter;
+    Emitter<Object> emitter;
 
     public MqttPublisher(AlfenConfig alfenConfig, AlfenController controller, MqttConfig mqttConfig) {
         this.mqttConfig = mqttConfig;
@@ -56,12 +57,21 @@ public class MqttPublisher {
         emitter.send(msg);
     }
 
-    public void sendModbus(String group, Map<Integer, Object> values, int addr) {
+    public void sendModbus(String name, String group, Map<Integer, Object> values, int addr) {
         if (!mqttConfig.enabled()) {
             LOG.debug("MQTT is disabled");
             return;
         }
-        MqttMessage<Object> msg = MqttMessage.of("alfen/modbus/state/" + addr + "/" + group, values, MqttQoS.AT_LEAST_ONCE);
+        MqttMessage<Object> msg = MqttMessage.of("alfen/modbus/state/" + name + "/" + addr + "/" + group, values, MqttQoS.AT_LEAST_ONCE);
+        emitter.send(msg);
+    }
+
+    public void sendModbusEvcc(String name, int addr, Evcc.Charger charger) {
+        if (!mqttConfig.enabled()) {
+            LOG.debug("MQTT is disabled");
+            return;
+        }
+        MqttMessage<Object> msg = MqttMessage.of("alfen/evcc/status/" + name + "/" + addr, charger, MqttQoS.AT_LEAST_ONCE);
         emitter.send(msg);
     }
 }

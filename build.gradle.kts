@@ -11,7 +11,7 @@ repositories {
 
 dependencies {
     implementation(enforcedPlatform(libs.quarkus.bom))
-    implementation("io.quarkus:quarkus-smallrye-reactive-messaging-mqtt")
+    implementation("io.quarkus:quarkus-messaging-mqtt")
     implementation("io.quarkus:quarkus-resteasy-jackson")
     implementation("io.quarkus:quarkus-arc")
     //implementation(libs.zeroconf)
@@ -20,6 +20,7 @@ dependencies {
     testImplementation("io.rest-assured:rest-assured")
     testImplementation("io.vertx:vertx-web")
     testImplementation("io.quarkus:quarkus-vertx")
+    testImplementation("io.quarkus:quarkus-junit5-mockito")
 }
 
 group = "org.acme"
