@@ -14,6 +14,7 @@ import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.reactive.messaging.Incoming;
 import org.eclipse.microprofile.reactive.messaging.Message;
 import org.muizenhol.alfen.data.Evcc;
@@ -50,6 +51,9 @@ public class AlfenModbus {
 
     @Inject
     Vertx vertx;
+
+    @ConfigProperty(name = "modbus.write_enabled", defaultValue = "false")
+    boolean writeEnabled;
 
     private final Map<String, ModbusTcpClient> clients = new HashMap<>();
 
@@ -89,7 +93,12 @@ public class AlfenModbus {
         });
 
         vertx.setPeriodic(0, Duration.ofSeconds(1).toMillis(), this::poll);
-        vertx.setPeriodic(0, Duration.ofSeconds(10).toMillis(), this::pollWrite);
+        if (writeEnabled) {
+            LOG.info("Startup: write enabled");
+            vertx.setPeriodic(0, Duration.ofSeconds(10).toMillis(), this::pollWrite);
+        } else {
+            LOG.info("Startup: write disabled");
+        }
     }
 
     public void onStop(@Observes ShutdownEvent shutdownEvent) {
@@ -110,6 +119,7 @@ public class AlfenModbus {
             return null;
         });
     }
+
     private void pollWrite(long l) {
         //ModBus has a safety that you need to keep writing.
         //If the connection drops, it will fall back to a default value.
@@ -149,7 +159,11 @@ public class AlfenModbus {
             ByteBuffer buf = ByteBuffer.wrap(response.registers());
             Map<Integer, Object> values = group.items().stream()
                     .collect(Collectors.toMap(ModbusConst.Item::start, i -> convert(i, buf, group)));
-            mqttPublisher.sendModbus(name, group.name(), values, unitId);
+            //Having ints as keys in json makes the parsing hard on some tools/libraries.
+            //So prefix with "S" from start to make them a string.
+            Map<String, Object> values2 = group.items().stream()
+                    .collect(Collectors.toMap(i -> "S" + i.start(), i -> convert(i, buf, group)));
+            mqttPublisher.sendModbus(name, group.name(), values2, unitId);
             return Optional.of(values);
 
         } catch (Exception e) {
@@ -276,6 +290,9 @@ public class AlfenModbus {
     }
 
     private void writeData(Consumer<ByteBuffer> setter, ModbusTcpClient client, ModbusConst.Item item, int unitId) {
+        if (!writeEnabled) {
+            return;
+        }
         try {
             int address = item.start();
             ByteBuffer buf = ByteBuffer.allocate(item.size() * 2);
@@ -297,6 +314,9 @@ public class AlfenModbus {
     }
 
     private void handleEvccNoReturn(Message<String> evcc, ReceivingMqttMessageMetadata meta) {
+        if (!writeEnabled) {
+            return;
+        }
         Matcher m = PATTERN_EVCC.matcher(meta.getTopic());
         if (!m.matches()) {
             LOG.warn("Unknown EVCC topic: {}", meta.getTopic());
