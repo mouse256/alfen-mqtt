@@ -7,7 +7,7 @@ public class DiscoveryHelper {
     public static String DEVICE_NAME = "alfen-mqtt";
 
     public MqttMessage<Object> genDiscovery(Discovery discovery, String id) {
-        MqttMessage<Object> msg = MqttMessage.of("homeassistant/device/" + DEVICE_NAME + "/" + id + "/config", discovery, MqttQoS.AT_LEAST_ONCE);
+        MqttMessage<Object> msg = MqttMessage.of("homeassistant/device/" + DEVICE_NAME + "/" + id + "/config", discovery, MqttQoS.AT_LEAST_ONCE, true);
         return msg;
     }
 }
