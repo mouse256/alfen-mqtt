@@ -6,8 +6,7 @@ import io.smallrye.reactive.messaging.mqtt.MqttMessage;
 public class DiscoveryHelper {
     public static String DEVICE_NAME = "alfen-mqtt";
 
-    public MqttMessage<Object> genDiscovery(Discovery discovery, String id) {
-        MqttMessage<Object> msg = MqttMessage.of("homeassistant/device/" + DEVICE_NAME + "/" + id + "/config", discovery, MqttQoS.AT_LEAST_ONCE, true);
-        return msg;
+    public MqttMessage<Object> genDiscovery(Discovery discovery) {
+        return MqttMessage.of("homeassistant/device/" + DEVICE_NAME + "/" + discovery.device().identifiers() + "/config", discovery, MqttQoS.AT_LEAST_ONCE, true);
     }
 }

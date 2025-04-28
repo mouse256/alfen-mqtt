@@ -18,6 +18,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.reactive.messaging.Incoming;
 import org.eclipse.microprofile.reactive.messaging.Message;
 import org.muizenhol.alfen.data.Evcc;
+import org.muizenhol.homeassistant.Discovery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -86,6 +87,7 @@ public class AlfenModbus {
                 setStates.put(client, new HashMap<>());
                 client.connect();
                 clients.put(deviceConfig.name(), client);
+                sendDiscovery(deviceConfig, client);
 
             } catch (Exception e) {
                 LOG.warn("Error connecting to modbus client: {}", deviceConfig.endpoint(), e);
@@ -163,7 +165,9 @@ public class AlfenModbus {
             //So prefix with "S" from start to make them a string.
             Map<String, Object> values2 = group.items().stream()
                     .collect(Collectors.toMap(i -> "S" + i.start(), i -> convert(i, buf, group)));
-            mqttPublisher.sendModbus(name, group.name(), values2, unitId);
+            if (name != null) {
+                mqttPublisher.sendModbus(name, group.name(), values2, unitId);
+            }
             return Optional.of(values);
 
         } catch (Exception e) {
@@ -384,5 +388,58 @@ public class AlfenModbus {
                 }
             });
         });
+    }
+
+    public void sendDiscovery(AlfenConfig.Device deviceConfig, ModbusTcpClient client) {
+        LOG.info("Generating discovery for {}", deviceConfig.name());
+
+
+        int nrOfSockets = readData(null, client, ModbusConst.STATION_STATUS, ModbusConst.ADDR_GENERIC)
+                .flatMap(values -> Optional.ofNullable(values.get(ModbusConst.ID_NR_OF_SOCKETS)))
+                .map(x -> (int) x)
+                .orElse(-1);
+        if (nrOfSockets == -1) {
+            LOG.warn("Can't fetch number of sockets, can't publish discovery info for {}", deviceConfig.name());
+            return;
+        }
+
+        String serial = (String) readData(null, client, ModbusConst.PRODUCT_IDENTIFICATION, ModbusConst.ADDR_GENERIC)
+                .flatMap(values -> Optional.ofNullable(values.get(ModbusConst.ID_STATION_SERIAL_NUMBER)))
+                .orElse(null);
+        if (serial == null) {
+            LOG.warn("Can't fetch serial number, can't publish discovery info for {}", deviceConfig.name());
+            return;
+        }
+
+        for (int s = 1; s <= nrOfSockets; s++) {
+
+            Map<String, Discovery.Component> components = ModbusConst.SOCKET_MEASUREMENT.items().stream()
+                    .filter(i -> i.discoveryInfo() != null)
+                    .map(i -> new Discovery.Component(
+                            i.name(),
+                            "socket_measurement_" + i.start(),
+                            Discovery.Component.Platform.SENSOR,
+                            i.discoveryInfo().deviceClass(),
+                            i.discoveryInfo().stateClass(),
+                            i.discoveryInfo().unit(),
+                            i.discoveryInfo().precision(),
+                            "{{ value_json.S" + i.start() + " }}"
+                    )).collect(Collectors.toMap(Discovery.Component::uniqueId, i -> i));
+            String uuid = serial + "-" + s;
+            Discovery discovery = new Discovery(
+                    new Discovery.Device(
+                            uuid,
+                            "mouse256",
+                            "alfen",
+                            "alfen-mqtt"
+                    )
+                    , new Discovery.Origin(
+                    "alfen-mqtt"
+            ),
+                    "alfen/modbus/state/" + deviceConfig.name() + "/" + s + "/socket_measurement",
+                    components
+            );
+            mqttPublisher.sendDiscovery(discovery);
+        }
     }
 }

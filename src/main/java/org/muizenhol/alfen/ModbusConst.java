@@ -44,6 +44,7 @@ public class ModbusConst {
 
     public static final int ADDR_GENERIC = 200;
     public static final int ID_NR_OF_SOCKETS = 1105;
+    public static final int ID_STATION_SERIAL_NUMBER = 157;
 
     /**
      * Generic data. To be read on ID 200
@@ -55,7 +56,7 @@ public class ModbusConst {
                     new Item("Modbus table version", 122, 1, DataType.SIGNED16),
                     new Item("Firmware version", 123, 17, DataType.STRING),
                     new Item("Platform type", 140, 17, DataType.STRING),
-                    new Item("Station serial number", 157, 11, DataType.STRING),
+                    new Item("Station serial number", ID_STATION_SERIAL_NUMBER, 11, DataType.STRING),
                     new Item("Date year", 168, 1, DataType.SIGNED16),
                     new Item("Date month", 169, 1, DataType.SIGNED16),
                     new Item("Date day", 170, 1, DataType.SIGNED16),
