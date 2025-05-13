@@ -7,17 +7,10 @@ import com.digitalpetri.modbus.pdu.ReadHoldingRegistersResponse;
 import com.digitalpetri.modbus.pdu.WriteMultipleRegistersRequest;
 import com.digitalpetri.modbus.pdu.WriteMultipleRegistersResponse;
 import com.digitalpetri.modbus.tcp.client.NettyTcpClientTransport;
-import io.quarkus.runtime.ShutdownEvent;
-import io.quarkus.runtime.StartupEvent;
-import io.smallrye.reactive.messaging.mqtt.ReceivingMqttMessageMetadata;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.eclipse.microprofile.reactive.messaging.Incoming;
-import org.eclipse.microprofile.reactive.messaging.Message;
-import org.muizenhol.alfen.data.Evcc;
 import org.muizenhol.homeassistant.Discovery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,7 +35,6 @@ import java.util.stream.StreamSupport;
 public class AlfenModbus {
 
     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-    private static final Pattern PATTERN_EVCC = Pattern.compile("alfen/evcc/set/([^/]+)/(\\d+)/(.*)");
 
     @Inject
     AlfenConfig alfenConfig;
@@ -56,6 +48,9 @@ public class AlfenModbus {
     @ConfigProperty(name = "modbus.write_enabled", defaultValue = "false")
     boolean writeEnabled;
 
+    @Inject
+    EvccHandler evccHandler;
+
     private final Map<String, ModbusTcpClient> clients = new HashMap<>();
 
     private record SetState(boolean enabled, float maxCurrent) {
@@ -63,7 +58,7 @@ public class AlfenModbus {
 
     private final Map<ModbusTcpClient, Map<Integer, SetState>> setStates = new HashMap<>();
 
-    public void onStart(@Observes StartupEvent startupEvent) {
+    public void start() {
         clients.clear();
         List<AlfenConfig.Device> deviceConfigs = alfenConfig.devices().stream()
                 .filter(d -> d.type() == AlfenConfig.DeviceType.MODBUS)
@@ -103,7 +98,7 @@ public class AlfenModbus {
         }
     }
 
-    public void onStop(@Observes ShutdownEvent shutdownEvent) {
+    public void stop() {
         clients.forEach((name, client) -> {
             try {
                 client.disconnect();
@@ -142,7 +137,7 @@ public class AlfenModbus {
                 for (int i = 1; i <= nrOfSocketsInt; ++i) {
                     Optional<Map<Integer, Object>> socketMeasurement = readData(name, client, ModbusConst.SOCKET_MEASUREMENT, i);
                     Optional<Map<Integer, Object>> status = readData(name, client, ModbusConst.STATUS, i);
-                    writeEvcc(name, i, status, socketMeasurement);
+                    evccHandler.writeEvcc(name, i, status, socketMeasurement);
                 }
             } else {
                 LOG.warn("Can't fetch number of sockets. Got null");
@@ -174,36 +169,6 @@ public class AlfenModbus {
             LOG.warn("Error reading data", e);
         }
         return Optional.empty();
-    }
-
-    private void writeEvcc(String name, int addr, Optional<Map<Integer, Object>> statusOpt, Optional<Map<Integer, Object>> socketMeasurementOpt) {
-        try {
-            Map<Integer, Object> status = statusOpt.orElseThrow(() -> new IllegalStateException("Status not present, can't send evcc"));
-            Map<Integer, Object> socketMeasurement = socketMeasurementOpt.orElseThrow(() -> new IllegalStateException("SocketMeasurement not present, can't send evcc"));
-
-            Evcc.Charger evccStatus = new Evcc.Charger(
-                    Optional.ofNullable(status.get(1200))
-                            .map(x -> ((Integer) x) == 1)
-                            .orElseThrow(() -> new IllegalStateException("Can't find field 1200")),
-                    Optional.ofNullable(status.get(1201))
-                            .map(x -> switch ((String) x) {
-                                        case "A" -> "A";
-                                        case "B1", "B2", "C1", "D1" -> "B";
-                                        case "C2", "D2" -> "C";
-                                        case "E", "F" -> "E";
-                                        default -> throw new IllegalStateException("Unexpected mode 3 state: " + x);
-                                    }
-                            )
-                            .orElseThrow(() -> new IllegalStateException("Can't find field 1201")),
-                    Optional.ofNullable(socketMeasurement.get(344))
-                            .map(x -> (Float) x)
-                            .orElseThrow(() -> new IllegalStateException("Can't find field 344"))
-
-            );
-            mqttPublisher.sendModbusEvcc(name, addr, evccStatus);
-        } catch (Exception e) {
-            LOG.warn("Error extracting evcc data", e);
-        }
     }
 
     private Object convert(ModbusConst.Item item, ByteBuffer buf, ModbusConst.Group group) {
@@ -266,18 +231,6 @@ public class AlfenModbus {
         return str;
     }
 
-    @Incoming("evcc")
-    public CompletionStage<Void> handleEvcc(Message<String> evcc) {
-        StreamSupport.stream(evcc.getMetadata().spliterator(), false)
-                .filter(x -> x instanceof ReceivingMqttMessageMetadata)
-                .map(x -> (ReceivingMqttMessageMetadata) x)
-                .findFirst()
-                .ifPresentOrElse(meta -> handleEvccNoReturn(evcc, meta), () -> {
-                    LOG.warn("Can't find MQTT message metadata");
-                });
-
-        return evcc.ack();
-    }
 
     void writeDataFloat(float value, ModbusTcpClient client, ModbusConst.Item item, int unitId) {
         writeData(s -> {
@@ -317,25 +270,11 @@ public class AlfenModbus {
         }
     }
 
-    private void handleEvccNoReturn(Message<String> evcc, ReceivingMqttMessageMetadata meta) {
+
+    public void handleWrite(String chargerName, int socket, String key, String payload) {
         if (!writeEnabled) {
             return;
         }
-        Matcher m = PATTERN_EVCC.matcher(meta.getTopic());
-        if (!m.matches()) {
-            LOG.warn("Unknown EVCC topic: {}", meta.getTopic());
-            return;
-        }
-        String chargerName = m.group(1);
-        int socket;
-        try {
-            socket = Integer.parseInt(m.group(2));
-        } catch (NumberFormatException e) {
-            LOG.warn("Can't parse value as int on topic {}: {}", meta.getTopic(), m.group(2));
-            return;
-        }
-        String key = m.group(3);
-        LOG.debug("Incoming evcc message for {} ({}): {}", chargerName, socket, key);
 
         ModbusTcpClient client = clients.get(chargerName);
         if (client == null) {
@@ -351,17 +290,17 @@ public class AlfenModbus {
         SetState setState = setStateSockets.getOrDefault(socket, new SetState(false, 0));
         switch (key) {
             case "enable":
-                boolean enable = Boolean.parseBoolean(evcc.getPayload());
+                boolean enable = Boolean.parseBoolean(payload);
                 LOG.info("Enable request for {} ({}): {}", chargerName, socket, enable);
                 setStateSockets.put(socket, new SetState(enable, setState.maxCurrent));
                 break;
             case "maxCurrent":
                 try {
-                    float valueF = Float.parseFloat(evcc.getPayload());
+                    float valueF = Float.parseFloat(payload);
                     LOG.info("MaxCurrent request for {} ({}): {}", chargerName, socket, valueF);
                     setStateSockets.put(socket, new SetState(setState.enabled, valueF));
                 } catch (NumberFormatException e) {
-                    LOG.warn("Error parsing float: {}", evcc.getMetadata());
+                    LOG.warn("Error parsing float: {}", payload);
                 }
                 break;
             default:

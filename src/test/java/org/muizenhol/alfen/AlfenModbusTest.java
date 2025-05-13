@@ -1,24 +1,19 @@
 package org.muizenhol.alfen;
 
-
+import io.quarkus.test.common.QuarkusTestResource;
+import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import java.lang.invoke.MethodHandles;
-import java.nio.ByteBuffer;
-
+@QuarkusTest
+@QuarkusTestResource(MockAlfenModbusTestResource.class)
 public class AlfenModbusTest {
 
-    private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+    @Inject
+    AlfenModbus alfenModbus;
 
     @Test
-    public void writeFloatTest() {
-        float testValue = 6;
-        ModbusConst.Item item = ModbusConst.ITEM_MAX_CURRENT;
-        ByteBuffer buf = ByteBuffer.allocate(item.size() * 2);
-        buf.putFloat(testValue);
-        byte[] values = buf.array();
-        LOG.info("out: {}", values);
+    public void test1() {
+        alfenModbus.handleWrite("ikke", 1, "mykey", "payload");
     }
 }
