@@ -24,12 +24,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CompletionStage;
 import java.util.function.Consumer;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
 @ApplicationScoped
 public class AlfenModbus {
@@ -51,7 +47,7 @@ public class AlfenModbus {
     @Inject
     EvccHandler evccHandler;
 
-    private final Map<String, ModbusTcpClient> clients = new HashMap<>();
+    final Map<String, ModbusTcpClient> clients = new HashMap<>();
 
     private record SetState(boolean enabled, float maxCurrent) {
     }

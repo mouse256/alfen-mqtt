@@ -131,7 +131,7 @@ public class ModbusConst {
                     //new Item("Reactive Energy Sum", 422, 4, DataType.FLOAT64) //seems problematic reading out this value
             ));
 
-    public static final Item ITEM_MAX_CURRENT = new Item("Modbus Slave Max Current", 1210, 2, DataType.FLOAT32);
+    public static final Item ITEM_MAX_CURRENT = new Item("Modbus Slave Max Current", 1210, 2, DataType.FLOAT32, Item.CURRENT_2);
     public static final Item ITEM_NUM_PHASES = new Item("Charge using 1 or 3 phases", 1215, 1, DataType.UNSIGNED16);
     /**
      * Socket specific data. To be read once per socket
@@ -140,7 +140,7 @@ public class ModbusConst {
             new Group("status", 1200, 16, List.of(
                     new Item("Availability", 1200, 1, DataType.UNSIGNED16),
                     new Item("Mode 3 state", 1201, 5, DataType.STRING),
-                    new Item("Actual Applied Max Current", 1206, 2, DataType.FLOAT32),
+                    new Item("Actual Applied Max Current", 1206, 2, DataType.FLOAT32, Item.CURRENT_2),
                     new Item("Modbus Slave Max Current valid time", 1208, 2, DataType.UNSIGNED32),
                     ITEM_MAX_CURRENT,
                     new Item("Active Load Balancing Safe Current", 1212, 2, DataType.FLOAT32),
