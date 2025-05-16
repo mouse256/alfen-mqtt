@@ -56,7 +56,7 @@ public class AlfenModbus {
     @ConfigProperty(name = "modbus.write_enabled", defaultValue = "false")
     boolean writeEnabled;
 
-    private final Map<String, ModbusTcpClient> clients = new HashMap<>();
+    final Map<String, ModbusTcpClient> clients = new HashMap<>();
 
     private record SetState(boolean enabled, float maxCurrent) {
     }
