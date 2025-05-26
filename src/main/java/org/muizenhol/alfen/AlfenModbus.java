@@ -70,7 +70,7 @@ public class AlfenModbus {
         deviceConfigs.forEach(deviceConfig -> {
             var transport = NettyTcpClientTransport.create(cfg -> {
                 cfg.hostname = deviceConfig.endpoint();
-                cfg.port = 502;
+                cfg.port = deviceConfig.port();
             });
 
             try {

@@ -20,7 +20,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.CoreMatchers.is;
 
 @QuarkusTest
-@QuarkusTestResource(MockAlfenDeviceResource.class)
+@QuarkusTestResource(value = MockAlfenDeviceResource.class, restrictToAnnotatedClass = true)
 public class ResourceTest {
 
     @InjectMockAlfenDevice

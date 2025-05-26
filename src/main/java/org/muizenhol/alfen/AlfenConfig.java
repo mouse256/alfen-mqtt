@@ -1,6 +1,7 @@
 package org.muizenhol.alfen;
 
 import io.smallrye.config.ConfigMapping;
+import jakarta.ws.rs.DefaultValue;
 
 import java.util.Optional;
 import java.util.Set;
@@ -11,6 +12,8 @@ public interface AlfenConfig {
 
     interface Device {
         String endpoint();
+        @DefaultValue("502")
+        int port();
 
         Optional<String> username();
 
