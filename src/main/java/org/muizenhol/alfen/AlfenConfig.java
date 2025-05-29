@@ -1,7 +1,7 @@
 package org.muizenhol.alfen;
 
 import io.smallrye.config.ConfigMapping;
-import jakarta.ws.rs.DefaultValue;
+import io.smallrye.config.WithDefault;
 
 import java.util.Optional;
 import java.util.Set;
@@ -12,7 +12,8 @@ public interface AlfenConfig {
 
     interface Device {
         String endpoint();
-        @DefaultValue("502")
+
+        @WithDefault("502")
         int port();
 
         Optional<String> username();
@@ -20,8 +21,10 @@ public interface AlfenConfig {
         Optional<String> password();
 
         String name();
+
         DeviceType type();
     }
+
     enum DeviceType {
         MODBUS,
         HTTP
