@@ -46,11 +46,24 @@ public class ModbusConst {
     public static final int ID_NR_OF_SOCKETS = 1105;
     public static final int ID_STATION_SERIAL_NUMBER = 157;
 
+    public enum StartOffset {
+        PRODUCT_IDENTIFICATION(100),
+        SOCKET_MEASUREMENT(300),
+        STATION_STATUS(1100),
+        SOCKET_STATUS(1200);
+
+        public final int offset;
+
+        StartOffset(int offset) {
+            this.offset = offset;
+        }
+    }
+
     /**
      * Generic data. To be read on ID 200
      */
     public static final Group PRODUCT_IDENTIFICATION =
-            new Group("product_identification", 100, 79, List.of(
+            new Group("product_identification", StartOffset.PRODUCT_IDENTIFICATION.offset, 79, List.of(
                     new Item("Name", 100, 17, DataType.STRING),
                     new Item("Manufacturer", 117, 5, DataType.STRING),
                     new Item("Modbus table version", 122, 1, DataType.SIGNED16),
@@ -70,7 +83,7 @@ public class ModbusConst {
      * Generic data. To be read on ID 200
      */
     public static final Group STATION_STATUS =
-            new Group("station_status", 1100, 6, List.of(
+            new Group("station_status", StartOffset.STATION_STATUS.offset, 6, List.of(
                     new Item("Station Active Max Current", 1100, 2, DataType.FLOAT32),
                     new Item("Temperature", 1102, 2, DataType.FLOAT32),
                     new Item("OCPP state", 1104, 1, DataType.UNSIGNED16),
@@ -81,7 +94,7 @@ public class ModbusConst {
      * Socket specific data. To be read once per socket
      */
     public static final Group SOCKET_MEASUREMENT =
-            new Group("socket_measurement", 300, 125, List.of(
+            new Group("socket_measurement", StartOffset.SOCKET_MEASUREMENT.offset, 125, List.of(
                     new Item("Meter state", 300, 1, DataType.SIGNED16),
                     new Item("Meter last value timestamp", 301, 4, DataType.UNSIGNED64),
                     new Item("Meter type", 305, 1, DataType.UNSIGNED16),
@@ -137,7 +150,7 @@ public class ModbusConst {
      * Socket specific data. To be read once per socket
      */
     public static final Group STATUS =
-            new Group("status", 1200, 16, List.of(
+            new Group("status", StartOffset.SOCKET_STATUS.offset, 16, List.of(
                     new Item("Availability", 1200, 1, DataType.UNSIGNED16),
                     new Item("Mode 3 state", 1201, 5, DataType.STRING),
                     new Item("Actual Applied Max Current", 1206, 2, DataType.FLOAT32, Item.CURRENT_2),

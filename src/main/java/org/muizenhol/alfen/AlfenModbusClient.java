@@ -23,7 +23,7 @@ import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
-public class AlfenModbusClient implements AutoCloseable{
+public class AlfenModbusClient implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -33,32 +33,46 @@ public class AlfenModbusClient implements AutoCloseable{
     private final MqttPublisher mqttPublisher;
     private final boolean writeEnabled;
 
-    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher) {
+    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, boolean writeEnabled, MqttPublisher mqttPublisher) {
         this.vertx = vertx;
+        this.client = client;
+        this.name = name;
+        this.mqttPublisher = mqttPublisher;
+        this.writeEnabled = writeEnabled;
+        setStates.put(client, new HashMap<>());
+    }
+
+    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher) {
+        this(vertx, deviceConfig.name(), createClient(deviceConfig), writeEnabled, mqttPublisher);
+        start(true);
+    }
+
+    private static ModbusTcpClient createClient(AlfenConfig.Device deviceConfig) {
         var transport = NettyTcpClientTransport.create(cfg -> {
             cfg.hostname = deviceConfig.endpoint();
             cfg.port = deviceConfig.port();
         });
 
-        client = ModbusTcpClient.create(transport);
-        name = deviceConfig.name();
-        this.mqttPublisher = mqttPublisher;
-        this.writeEnabled = writeEnabled;
+        return ModbusTcpClient.create(transport);
+    }
+
+    void start(boolean pollEnabled) {
         try {
-            setStates.put(client, new HashMap<>());
             client.connect();
-            sendDiscovery(deviceConfig, client);
+            sendDiscovery();
         } catch (Exception e) {
-            LOG.warn("Error connecting to modbus client: {}", deviceConfig.endpoint(), e);
+            LOG.warn("Error connecting to modbus client: {}", name, e);
             return;
         }
 
-        vertx.setPeriodic(0, Duration.ofSeconds(1).toMillis(), this::poll);
-        if (writeEnabled) {
-            LOG.info("Startup: write enabled");
-            vertx.setPeriodic(0, Duration.ofSeconds(10).toMillis(), this::pollWrite);
-        } else {
-            LOG.info("Startup: write disabled");
+        if (pollEnabled) {
+            vertx.setPeriodic(0, Duration.ofSeconds(1).toMillis(), this::poll);
+            if (writeEnabled) {
+                LOG.info("Startup: write enabled");
+                vertx.setPeriodic(0, Duration.ofSeconds(10).toMillis(), this::pollWrite);
+            } else {
+                LOG.info("Startup: write disabled");
+            }
         }
     }
 
@@ -79,9 +93,13 @@ public class AlfenModbusClient implements AutoCloseable{
     private void poll(long l) {
         LOG.debug("Polling...");
         vertx.executeBlocking(() -> {
-            readData();
+            pollRead();
             return null;
         });
+    }
+
+    void pollRead() {
+        readData();
     }
 
     private void pollWrite(long l) {
@@ -296,8 +314,8 @@ public class AlfenModbusClient implements AutoCloseable{
 //        });
 //    }
 
-    public void sendDiscovery(AlfenConfig.Device deviceConfig, ModbusTcpClient client) {
-        LOG.info("Generating discovery for {}", deviceConfig.name());
+    public void sendDiscovery() {
+        LOG.info("Generating discovery for {}", name);
 
 
         int nrOfSockets = readData(ModbusConst.STATION_STATUS, ModbusConst.ADDR_GENERIC, false)
@@ -305,7 +323,7 @@ public class AlfenModbusClient implements AutoCloseable{
                 .map(x -> (int) x)
                 .orElse(-1);
         if (nrOfSockets == -1) {
-            LOG.warn("Can't fetch number of sockets, can't publish discovery info for {}", deviceConfig.name());
+            LOG.warn("Can't fetch number of sockets, can't publish discovery info for {}", name);
             return;
         }
 
@@ -313,7 +331,7 @@ public class AlfenModbusClient implements AutoCloseable{
                 .flatMap(values -> Optional.ofNullable(values.get(ModbusConst.ID_STATION_SERIAL_NUMBER)))
                 .orElse(null);
         if (serial == null) {
-            LOG.warn("Can't fetch serial number, can't publish discovery info for {}", deviceConfig.name());
+            LOG.warn("Can't fetch serial number, can't publish discovery info for {}", name);
             return;
         }
 
@@ -342,7 +360,7 @@ public class AlfenModbusClient implements AutoCloseable{
                     , new Discovery.Origin(
                     "alfen-mqtt"
             ),
-                    "alfen/modbus/state/" + deviceConfig.name() + "/" + s + "/socket_measurement",
+                    "alfen/modbus/state/" + name + "/" + s + "/socket_measurement",
                     components
             );
             mqttPublisher.sendDiscovery(discovery);
