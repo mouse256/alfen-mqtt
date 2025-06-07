@@ -17,9 +17,7 @@ import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -32,18 +30,34 @@ public class AlfenModbusClient implements AutoCloseable {
     private final String name;
     private final MqttPublisher mqttPublisher;
     private final boolean writeEnabled;
+    private final MqttListener mqttListener;
+    private final List<AlfenModbusWriter> writers = new ArrayList<>();
 
-    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, boolean writeEnabled, MqttPublisher mqttPublisher) {
+    /**
+     * States to set/write. Indexed per socket.
+     */
+    private final Map<Integer, SetState> setStates = new HashMap<>();
+
+    /**
+     * Last state read. Indexed per socket
+     */
+    private final Map<Integer, Map<Integer, Object>> socketStatus = new HashMap<>();
+
+
+    private record SetState(boolean enabled, float maxCurrent, int numPhases) {
+    }
+
+    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, boolean writeEnabled, MqttPublisher mqttPublisher, MqttListener mqttListener) {
         this.vertx = vertx;
         this.client = client;
         this.name = name;
         this.mqttPublisher = mqttPublisher;
+        this.mqttListener = mqttListener;
         this.writeEnabled = writeEnabled;
-        setStates.put(client, new HashMap<>());
     }
 
-    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher) {
-        this(vertx, deviceConfig.name(), createClient(deviceConfig), writeEnabled, mqttPublisher);
+    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher, MqttListener mqttListener) {
+        this(vertx, deviceConfig.name(), createClient(deviceConfig), writeEnabled, mqttPublisher, mqttListener);
         start(true);
     }
 
@@ -83,12 +97,13 @@ public class AlfenModbusClient implements AutoCloseable {
         } catch (ModbusExecutionException e) {
             LOG.debug("Error stopping modbus client", e);
         }
+        writers.forEach(AlfenModbusWriter::close);
+        writers.clear();
     }
 
-    private record SetState(boolean enabled, float maxCurrent) {
+    public String getName() {
+        return name;
     }
-
-    private final Map<ModbusTcpClient, Map<Integer, SetState>> setStates = new HashMap<>();
 
     private void poll(long l) {
         LOG.debug("Polling...");
@@ -112,7 +127,7 @@ public class AlfenModbusClient implements AutoCloseable {
         });
     }
 
-    private void readData() {
+    private synchronized void readData() {
         readData(ModbusConst.PRODUCT_IDENTIFICATION, ModbusConst.ADDR_GENERIC, true);
         readData(ModbusConst.STATION_STATUS, ModbusConst.ADDR_GENERIC, true).ifPresent(values -> {
             Object nrOfSockets = values.get(ModbusConst.ID_NR_OF_SOCKETS);
@@ -120,9 +135,10 @@ public class AlfenModbusClient implements AutoCloseable {
                 int nrOfSocketsInt = (int) nrOfSockets;
                 LOG.debug("NrOfSockets: {}", nrOfSocketsInt);
                 for (int i = 1; i <= nrOfSocketsInt; ++i) {
-                    Optional<Map<Integer, Object>> socketMeasurement = readData(ModbusConst.SOCKET_MEASUREMENT, i, true);
-                    Optional<Map<Integer, Object>> status = readData(ModbusConst.STATUS, i, true);
-                    //evccHandler.writeEvcc(name, i, status, socketMeasurement);
+                    final int socket = i;
+                    readData(ModbusConst.SOCKET_MEASUREMENT, i, true);
+                    readData(ModbusConst.STATUS, i, true)
+                            .ifPresent(s -> socketStatus.put(socket, s));
                 }
             } else {
                 LOG.warn("Can't fetch number of sockets. Got null");
@@ -141,13 +157,8 @@ public class AlfenModbusClient implements AutoCloseable {
             ByteBuffer buf = ByteBuffer.wrap(response.registers());
             Map<Integer, Object> values = group.items().stream()
                     .collect(Collectors.toMap(ModbusConst.Item::start, i -> convert(i, buf, group)));
-            if (writeMqtt) {
-                //Having ints as keys in json makes the parsing hard on some tools/libraries.
-                //So prefix with "S" from start to make them a string.
-                Map<String, Object> values2 = group.items().stream()
-                        .collect(Collectors.toMap(i -> "S" + i.start(), i -> convert(i, buf, group)));
-                mqttPublisher.sendModbus(name, group.name(), values2, unitId);
-            }
+            mqttPublisher.sendModbus(name, group.name(), values, unitId);
+
             return Optional.of(values);
 
         } catch (Exception e) {
@@ -255,65 +266,6 @@ public class AlfenModbusClient implements AutoCloseable {
         }
     }
 
-
-//    public void handleWrite(String chargerName, int socket, String key, String payload) {
-//        if (!writeEnabled) {
-//            return;
-//        }
-//
-//        ModbusTcpClient client = clients.get(chargerName);
-//        if (client == null) {
-//            LOG.warn("Unknown EVCC client: \"{}\" ({})", chargerName, clients.values());
-//            return;
-//        }
-//
-//        Map<Integer, SetState> setStateSockets = setStates.get(client);
-//        if (setStateSockets == null) {
-//            LOG.warn("Unknown EVCC set state: \"{}\"", chargerName);
-//            return;
-//        }
-//        SetState setState = setStateSockets.getOrDefault(socket, new SetState(false, 0));
-//        switch (key) {
-//            case "enable":
-//                boolean enable = Boolean.parseBoolean(payload);
-//                LOG.info("Enable request for {} ({}): {}", chargerName, socket, enable);
-//                setStateSockets.put(socket, new SetState(enable, setState.maxCurrent));
-//                break;
-//            case "maxCurrent":
-//                try {
-//                    float valueF = Float.parseFloat(payload);
-//                    LOG.info("MaxCurrent request for {} ({}): {}", chargerName, socket, valueF);
-//                    setStateSockets.put(socket, new SetState(setState.enabled, valueF));
-//                } catch (NumberFormatException e) {
-//                    LOG.warn("Error parsing float: {}", payload);
-//                }
-//                break;
-//            default:
-//                LOG.warn("Unknown EVCC key: {}", key);
-//        }
-//        writeData();
-//    }
-//
-//    private void writeData() {
-//        setStates.forEach((client, setStateSockets) -> {
-//            setStateSockets.forEach((socket, state) -> {
-//                LOG.debug("Writing state for socket {} ({})", socket, state);
-//                if (state.enabled) {
-//                    float maxCurrent = state.maxCurrent;
-//                    int phases = 1;
-//                    if (state.maxCurrent >= 18) {
-//                        maxCurrent = state.maxCurrent / 3;
-//                        phases = 3;
-//                    }
-//                    writeDataFloat(maxCurrent, client, ModbusConst.ITEM_MAX_CURRENT, socket);
-//                    //writeDataUnsigned16(phases, client, ModbusConst.ITEM_NUM_PHASES, socket);
-//                } else {
-//                    writeDataFloat(0, client, ModbusConst.ITEM_MAX_CURRENT, socket);
-//                }
-//            });
-//        });
-//    }
-
     public void sendDiscovery() {
         LOG.info("Generating discovery for {}", name);
 
@@ -336,6 +288,7 @@ public class AlfenModbusClient implements AutoCloseable {
         }
 
         for (int s = 1; s <= nrOfSockets; s++) {
+            writers.add(new AlfenModbusWriter(this, name, s, mqttListener));
 
             Map<String, Discovery.Component> components = ModbusConst.SOCKET_MEASUREMENT.items().stream()
                     .filter(i -> i.discoveryInfo() != null)
@@ -365,5 +318,50 @@ public class AlfenModbusClient implements AutoCloseable {
             );
             mqttPublisher.sendDiscovery(discovery);
         }
+    }
+
+    private void pollWrite() {
+
+    }
+
+
+    public void disable(int socket) {
+        LOG.info("Set socket {} to disabled", socket);
+        setStates.put(socket, new SetState(false, 0, 1));
+
+        writeData();
+    }
+
+    public void setState(int socket, float maxCurrent, int numPhases) {
+        if (!writeEnabled) {
+            return;
+        }
+
+        LOG.info("Set socket {} to enabled, maxCurrent: {}, numPhases: {}", socket, maxCurrent, numPhases);
+        setStates.put(socket, new SetState(true, maxCurrent, numPhases));
+
+        writeData();
+    }
+
+    private synchronized void writeData() {
+        setStates.forEach((socket, state) -> {
+            LOG.debug("Writing state for socket {} ({})", socket, state);
+            if (state.enabled) {
+                Map<Integer, Object> currentStatus = socketStatus.get(socket);
+                if (currentStatus == null) {
+                    LOG.warn("Current status for socket {} unknown", socket);
+                    return;
+                }
+                writeDataFloat(state.maxCurrent, client, ModbusConst.ITEM_MAX_CURRENT, socket);
+                int numPhases = (int) currentStatus.get(ModbusConst.ITEM_NUM_PHASES.start());
+                if (numPhases != state.numPhases) {
+                    LOG.info("Changing number of phases to charge from {} to {}", numPhases, state.numPhases);
+                    writeDataUnsigned16(state.numPhases, client, ModbusConst.ITEM_NUM_PHASES, socket);
+                }
+
+            } else {
+                writeDataFloat(0, client, ModbusConst.ITEM_MAX_CURRENT, socket);
+            }
+        });
     }
 }

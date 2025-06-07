@@ -36,6 +36,9 @@ public class AlfenModbusClientTest {
     @InjectMock
     MqttPublisher mqttPublisher;
 
+    @InjectMock
+    MqttListener mqttListener;
+
     @Inject
     Vertx vertx;
 
@@ -47,7 +50,7 @@ public class AlfenModbusClientTest {
     @BeforeEach
     void setup() {
         mockClient = Mockito.mock(ModbusTcpClient.class);
-        alfenModbusClient = new AlfenModbusClient(vertx, "test1", mockClient, true, mqttPublisher);
+        alfenModbusClient = new AlfenModbusClient(vertx, "test1", mockClient, true, mqttPublisher, mqttListener);
     }
 
     private void prepare() throws Exception {
@@ -85,7 +88,7 @@ public class AlfenModbusClientTest {
         alfenModbusClient.pollRead();
 
         //verify
-        ArgumentCaptor<Map<?, Object>> argumentCaptor = ArgumentCaptor.forClass(Map.class);
+        ArgumentCaptor<Map<Integer, Object>> argumentCaptor = ArgumentCaptor.forClass(Map.class);
         verify(mqttPublisher, times(4)).sendModbus(any(), any(), any(), anyInt());
         verify(mqttPublisher).sendModbus(ArgumentMatchers.eq("test1"),
                 ArgumentMatchers.eq(ModbusConst.PRODUCT_IDENTIFICATION.name()),
@@ -111,7 +114,7 @@ public class AlfenModbusClientTest {
                 ArgumentMatchers.eq(1));
         Map<?, Object> socketMeasure = argumentCaptor.getValue();
         assertThat(socketMeasure.size(), Matchers.equalTo(ModbusConst.SOCKET_MEASUREMENT.items().size()));
-        assertThat(socketMeasure.get("S" + 344),  Matchers.equalTo(testFloatValue)); //real power sum
+        assertThat(socketMeasure.get(344),  Matchers.equalTo(testFloatValue)); //real power sum
     }
 
     private byte[] makeRegisters(int unitId, ReadHoldingRegistersRequest req) {

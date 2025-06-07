@@ -38,6 +38,9 @@ public class AlfenModbus {
     MqttPublisher mqttPublisher;
 
     @Inject
+    MqttListener mqttListener;
+
+    @Inject
     Vertx vertx;
 
     @ConfigProperty(name = "modbus.write_enabled", defaultValue = "false")
@@ -67,7 +70,7 @@ public class AlfenModbus {
                 .collect(Collectors.toList()));
 
         deviceConfigs.forEach(deviceConfig -> clients.put(deviceConfig.name(),
-                new AlfenModbusClient(vertx, deviceConfig, writeEnabled, mqttPublisher)));
+                new AlfenModbusClient(vertx, deviceConfig, writeEnabled, mqttPublisher, mqttListener)));
 
     }
 

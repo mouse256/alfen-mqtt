@@ -19,6 +19,7 @@ import java.lang.invoke.MethodHandles;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 
 @ApplicationScoped
@@ -60,12 +61,17 @@ public class MqttPublisher {
         emitter.send(msg);
     }
 
-    public void sendModbus(String name, String group, Map<?, Object> values, int addr) {
+    public void sendModbus(String name, String group, Map<Integer, Object> values, int addr) {
         if (!mqttConfig.enabled()) {
             LOG.debug("MQTT is disabled");
             return;
         }
-        MqttMessage<Object> msg = MqttMessage.of("alfen/modbus/state/" + name + "/" + addr + "/" + group, values, MqttQoS.AT_LEAST_ONCE);
+        //Having ints as keys in json makes the parsing hard on some tools/libraries.
+        //So prefix with "S" from start to make them a string.
+        Map<String, Object> values2 = values.entrySet().stream()
+                .collect(Collectors.toMap(i -> "S" + i.getKey(), Map.Entry::getValue));
+
+        MqttMessage<Object> msg = MqttMessage.of("alfen/modbus/state/" + name + "/" + addr + "/" + group, values2, MqttQoS.AT_LEAST_ONCE);
         emitter.send(msg);
     }
 
