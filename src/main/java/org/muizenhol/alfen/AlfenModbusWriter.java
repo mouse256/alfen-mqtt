@@ -7,14 +7,14 @@ import java.lang.invoke.MethodHandles;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public class AlfenModbusWriter implements AutoCloseable, MqttListener.Listener {
+public class AlfenModbusWriter implements AutoCloseable, MqttHandler.Listener {
 
     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
     private static final String KEY_MODE = "mode";
     private final AlfenModbusClient client;
     private final int socket;
     private final String chargerName;
-    private final MqttListener mqttListener;
+    private final MqttHandler mqttListener;
 
     public enum ChargeMode {
         NO_CHARGE,
@@ -25,14 +25,14 @@ public class AlfenModbusWriter implements AutoCloseable, MqttListener.Listener {
 
     //private ChargeMode chargeMode = ChargeMode.PV_ONLY; //default mode
 
-    public AlfenModbusWriter(AlfenModbusClient client, String chargerName, int socket, MqttListener mqttListener) {
+    public AlfenModbusWriter(AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttListener) {
         this.client = client;
         this.socket = socket;
         this.chargerName = chargerName;
         this.mqttListener = mqttListener;
         // topic: alfen/set/<chargername>/<socket>/<key>
         Pattern pattern = Pattern.compile("alfen/set/" + chargerName + "/(\\d+)/(.*)");
-        mqttListener.register(pattern, this);
+        mqttListener.register(pattern, "alfen/set/+/+/+", this);
     }
 
     @Override
@@ -43,19 +43,15 @@ public class AlfenModbusWriter implements AutoCloseable, MqttListener.Listener {
     @Override
     public void handleMessage(String topic, Matcher m, String payload) {
 
-        String chargerName = m.group(1);
-        if (!chargerName.equals(client.getName())) {
-            LOG.debug("Msg for another charger: {} != {}", client.getName(), chargerName);
-            return;
-        }
+        LOG.info("Handling msg");
         int socket;
         try {
-            socket = Integer.parseInt(m.group(2));
+            socket = Integer.parseInt(m.group(1));
         } catch (NumberFormatException e) {
-            LOG.warn("Can't parse value as int on topic {}: {}", topic, m.group(2));
+            LOG.warn("Can't parse value as int on topic {}: {}", topic, m.group(1));
             return;
         }
-        String key = m.group(3);
+        String key = m.group(2);
         LOG.info("Incoming set message for {} ({}): {} -> {}", chargerName, socket, key, payload);
         if (key.equalsIgnoreCase(KEY_MODE)) {
             try {

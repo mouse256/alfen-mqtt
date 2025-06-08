@@ -3,17 +3,26 @@ package org.muizenhol.alfen;
 import com.digitalpetri.modbus.client.ModbusTcpClient;
 import com.digitalpetri.modbus.pdu.ReadHoldingRegistersRequest;
 import com.digitalpetri.modbus.pdu.ReadHoldingRegistersResponse;
+import com.digitalpetri.modbus.pdu.WriteMultipleRegistersRequest;
+import com.digitalpetri.modbus.pdu.WriteMultipleRegistersResponse;
+import io.netty.handler.codec.mqtt.MqttQoS;
 import io.quarkus.test.InjectMock;
+import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.smallrye.reactive.messaging.mqtt.MqttMessage;
 import io.vertx.core.Vertx;
+import io.vertx.core.buffer.Buffer;
+import io.vertx.mqtt.MqttClient;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.reactive.messaging.Message;
 import org.hamcrest.Matchers;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.mockito.ArgumentMatcher;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
+import org.muizenhol.alfen.mqtt.MqttTestResource;
 import org.muizenhol.homeassistant.Discovery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,10 +34,13 @@ import java.util.Arrays;
 import java.util.Map;
 
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.mockito.ArgumentMatchers.*;
+import static org.hamcrest.Matchers.equalTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.*;
 
 @QuarkusTest
+@QuarkusTestResource(value = MqttTestResource.class, restrictToAnnotatedClass = true)
 public class AlfenModbusClientTest {
 
     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
@@ -36,8 +48,11 @@ public class AlfenModbusClientTest {
     @InjectMock
     MqttPublisher mqttPublisher;
 
-    @InjectMock
-    MqttListener mqttListener;
+    @Inject
+    MqttHandler mqttHandler;
+
+    @Inject
+    MqttConfig mqttConfig;
 
     @Inject
     Vertx vertx;
@@ -46,11 +61,19 @@ public class AlfenModbusClientTest {
 
     private AlfenModbusClient alfenModbusClient;
     private static final float testFloatValue = 78.45f;
+    private static final String DEVICE_NAME = "test1";
 
     @BeforeEach
     void setup() {
         mockClient = Mockito.mock(ModbusTcpClient.class);
-        alfenModbusClient = new AlfenModbusClient(vertx, "test1", mockClient, true, mqttPublisher, mqttListener);
+        mqttHandler.start();
+        alfenModbusClient = new AlfenModbusClient(vertx, DEVICE_NAME, mockClient, true, mqttPublisher, mqttHandler);
+    }
+
+    @AfterEach
+    void afterEach() {
+        mqttHandler.stop();
+        alfenModbusClient.close();
     }
 
     private void prepare() throws Exception {
@@ -61,6 +84,10 @@ public class AlfenModbusClientTest {
             LOG.info("Received ReadHoldingRegistersRequest unit: {} -- addr: {} -- function: {}", unitId, req.address(), req.getFunctionCode());
             return new ReadHoldingRegistersResponse(makeRegisters(unitId, req));
         }).when(mockClient).readHoldingRegisters(Mockito.anyInt(), Mockito.any());
+        Mockito.doAnswer(invocation -> {
+            LOG.info("Writing holding register");
+            return new WriteMultipleRegistersResponse(123, 1);
+        }).when(mockClient).writeMultipleRegisters(anyInt(), any());
     }
 
 
@@ -76,8 +103,8 @@ public class AlfenModbusClientTest {
         verify(mqttPublisher).sendDiscovery(argumentCaptor.capture());
 
         Discovery capturedArgument = argumentCaptor.getValue();
-        assertThat(capturedArgument.stateTopic(), Matchers.equalTo("alfen/modbus/state/test1/1/socket_measurement"));
-        assertThat(capturedArgument.components().size(), Matchers.equalTo(9));
+        assertThat(capturedArgument.stateTopic(), equalTo("alfen/modbus/state/test1/1/socket_measurement"));
+        assertThat(capturedArgument.components().size(), equalTo(9));
     }
 
     @Test
@@ -94,27 +121,59 @@ public class AlfenModbusClientTest {
                 ArgumentMatchers.eq(ModbusConst.PRODUCT_IDENTIFICATION.name()),
                 argumentCaptor.capture(),
                 ArgumentMatchers.eq(ModbusConst.ADDR_GENERIC));
-        assertThat(argumentCaptor.getValue().size(), Matchers.equalTo(ModbusConst.PRODUCT_IDENTIFICATION.items().size()));
+        assertThat(argumentCaptor.getValue().size(), equalTo(ModbusConst.PRODUCT_IDENTIFICATION.items().size()));
 
         verify(mqttPublisher).sendModbus(ArgumentMatchers.eq("test1"),
                 ArgumentMatchers.eq(ModbusConst.STATUS.name()),
                 argumentCaptor.capture(),
                 ArgumentMatchers.eq(1));
-        assertThat(argumentCaptor.getValue().size(), Matchers.equalTo(ModbusConst.STATUS.items().size()));
+        assertThat(argumentCaptor.getValue().size(), equalTo(ModbusConst.STATUS.items().size()));
 
         verify(mqttPublisher).sendModbus(ArgumentMatchers.eq("test1"),
                 ArgumentMatchers.eq(ModbusConst.STATION_STATUS.name()),
                 argumentCaptor.capture(),
                 ArgumentMatchers.eq(ModbusConst.ADDR_GENERIC));
-        assertThat(argumentCaptor.getValue().size(), Matchers.equalTo(ModbusConst.STATION_STATUS.items().size()));
+        assertThat(argumentCaptor.getValue().size(), equalTo(ModbusConst.STATION_STATUS.items().size()));
 
         verify(mqttPublisher).sendModbus(ArgumentMatchers.eq("test1"),
                 ArgumentMatchers.eq(ModbusConst.SOCKET_MEASUREMENT.name()),
                 argumentCaptor.capture(),
                 ArgumentMatchers.eq(1));
         Map<?, Object> socketMeasure = argumentCaptor.getValue();
-        assertThat(socketMeasure.size(), Matchers.equalTo(ModbusConst.SOCKET_MEASUREMENT.items().size()));
-        assertThat(socketMeasure.get(344),  Matchers.equalTo(testFloatValue)); //real power sum
+        assertThat(socketMeasure.size(), equalTo(ModbusConst.SOCKET_MEASUREMENT.items().size()));
+        assertThat(socketMeasure.get(344), equalTo(testFloatValue)); //real power sum
+    }
+
+    @Test
+    void testWrite() throws Exception {
+        prepare();
+
+        //discovery. Starts the writer thread.
+        alfenModbusClient.start(false);
+        //do 1 read to initialize some variables
+        alfenModbusClient.pollRead();
+
+        //exec
+        MqttClient client = MqttClient.create(vertx);
+        client.connect(mqttConfig.port(), mqttConfig.host()).toCompletionStage().toCompletableFuture().join();
+
+        LOG.info("publish");
+        client.publish("alfen/set/" + DEVICE_NAME + "/1/mode", Buffer.buffer("PV_ONLY"), MqttQoS.AT_LEAST_ONCE, false, false);
+        ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
+        verify(mockClient, timeout(2_000).times(2)).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
+        assertThat(argumentCaptor.getAllValues().size(), equalTo(2));
+
+        WriteMultipleRegistersRequest first = argumentCaptor.getAllValues().getFirst();
+        assertThat(first.address(), equalTo(1210)); //max current
+        assertThat(ByteBuffer.wrap(first.values()).getFloat(), equalTo(6f)); //6 amp
+
+        WriteMultipleRegistersRequest sec = argumentCaptor.getAllValues().get(1);
+        assertThat(sec.address(), equalTo(1215));
+        assertThat(getShort(ByteBuffer.wrap(sec.values())), equalTo(1)); //1 phase
+    }
+
+    private int getShort(ByteBuffer buf) {
+        return buf.getShort() & 0x0000ffff;
     }
 
     private byte[] makeRegisters(int unitId, ReadHoldingRegistersRequest req) {

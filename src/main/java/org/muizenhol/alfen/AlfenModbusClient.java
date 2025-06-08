@@ -30,7 +30,7 @@ public class AlfenModbusClient implements AutoCloseable {
     private final String name;
     private final MqttPublisher mqttPublisher;
     private final boolean writeEnabled;
-    private final MqttListener mqttListener;
+    private final MqttHandler mqttListener;
     private final List<AlfenModbusWriter> writers = new ArrayList<>();
 
     /**
@@ -47,7 +47,7 @@ public class AlfenModbusClient implements AutoCloseable {
     private record SetState(boolean enabled, float maxCurrent, int numPhases) {
     }
 
-    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, boolean writeEnabled, MqttPublisher mqttPublisher, MqttListener mqttListener) {
+    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener) {
         this.vertx = vertx;
         this.client = client;
         this.name = name;
@@ -56,7 +56,7 @@ public class AlfenModbusClient implements AutoCloseable {
         this.writeEnabled = writeEnabled;
     }
 
-    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher, MqttListener mqttListener) {
+    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener) {
         this(vertx, deviceConfig.name(), createClient(deviceConfig), writeEnabled, mqttPublisher, mqttListener);
         start(true);
     }

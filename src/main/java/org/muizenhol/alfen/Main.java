@@ -21,6 +21,9 @@ public class Main {
     @Inject
     AlfenController alfenController;
 
+    @Inject
+    MqttHandler mqttHandler;
+
     @ConfigProperty(name = "auto.startup", defaultValue = "true")
     boolean autoStartup;
 
@@ -31,6 +34,7 @@ public class Main {
         LOG.info("Starting up");
         alfenModbus.start();
         alfenController.start();
+        mqttHandler.start();
     }
 
     public void onStop(@Observes ShutdownEvent shutdownEvent) {
@@ -40,5 +44,6 @@ public class Main {
         LOG.info("Shutting down");
         alfenModbus.stop();
         alfenController.stop();
+        mqttHandler.stop();
     }
 }

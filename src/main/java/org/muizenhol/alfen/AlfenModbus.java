@@ -38,7 +38,7 @@ public class AlfenModbus {
     MqttPublisher mqttPublisher;
 
     @Inject
-    MqttListener mqttListener;
+    MqttHandler mqttListener;
 
     @Inject
     Vertx vertx;

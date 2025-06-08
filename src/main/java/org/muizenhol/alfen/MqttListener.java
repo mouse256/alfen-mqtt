@@ -3,6 +3,7 @@ package org.muizenhol.alfen;
 import io.smallrye.mutiny.tuples.Tuple2;
 import io.smallrye.reactive.messaging.mqtt.ReceivingMqttMessageMetadata;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.eclipse.microprofile.reactive.messaging.Incoming;
 import org.eclipse.microprofile.reactive.messaging.Message;
 import org.slf4j.Logger;
@@ -24,6 +25,9 @@ public class MqttListener {
     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
     private final List<Tuple2<Pattern, Listener>> listeners = new ArrayList<>();
 
+    @Inject
+    MqttHandler mqttHandler;
+
     public interface Listener {
         void handleMessage(String topic, Matcher matchedTopic, String payload);
     }
@@ -42,7 +46,7 @@ public class MqttListener {
         return setMsg.ack();
     }
 
-    public void register(Pattern topicPattern, Listener listener) {
+    public void register(Pattern topicPattern, String mqttPattern, Listener listener) {
         listeners.add(Tuple2.of(topicPattern, listener));
     }
 
