@@ -136,7 +136,7 @@ public class MqttHandler {
         listeners.forEach(t -> {
             Matcher m = t.pattern.matcher(msg.topicName());
             if (m.matches()) {
-                LOG.warn("Dispatching to {}", t.mqttPattern);
+                LOG.debug("Dispatching to {}", t.mqttPattern);
                 t.listener.handleMessage(msg.topicName(), m, msg.payload().toString());
             }
         });
