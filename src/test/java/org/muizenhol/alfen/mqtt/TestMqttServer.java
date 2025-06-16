@@ -21,9 +21,8 @@ import java.util.regex.Pattern;
 public class TestMqttServer {
     private final Vertx vertx;
     private MqttServer mqttServer;
-    //private final Map<String, Set<MqttEndpoint>> topicSubscribers = new ConcurrentHashMap<>();
     private final List<Item> subscribers = Collections.synchronizedList(new ArrayList<>());
-    //private final Map<String, Item> subscribers = new ConcurrentHashMap<>();
+    private final List<MqttEndpoint> endpoints = Collections.synchronizedList(new ArrayList<>());
 
     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -39,6 +38,7 @@ public class TestMqttServer {
         mqttServer = MqttServer.create(vertx, options);
 
         mqttServer.endpointHandler(endpoint -> {
+            endpoints.add(endpoint);
             endpoint.accept(false);
 
             // Handle subscriptions
@@ -113,5 +113,16 @@ public class TestMqttServer {
             mqttServer.close();
             subscribers.clear();
         }
+    }
+
+    public void cleanup() {
+        LOG.info("Cleanup");
+        try {
+            endpoints.forEach(MqttEndpoint::close);
+        } catch (Exception e) {
+            //don't care
+        }
+        endpoints.clear();
+        subscribers.clear();
     }
 }

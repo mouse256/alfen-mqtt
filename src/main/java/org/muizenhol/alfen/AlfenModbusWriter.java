@@ -14,7 +14,7 @@ public class AlfenModbusWriter implements AutoCloseable, MqttHandler.Listener {
     private final AlfenModbusClient client;
     private final int socket;
     private final String chargerName;
-    private final MqttHandler mqttListener;
+    private final MqttHandler mqttHandler;
 
     public enum ChargeMode {
         NO_CHARGE,
@@ -29,7 +29,7 @@ public class AlfenModbusWriter implements AutoCloseable, MqttHandler.Listener {
         this.client = client;
         this.socket = socket;
         this.chargerName = chargerName;
-        this.mqttListener = mqttListener;
+        this.mqttHandler = mqttListener;
         // topic: alfen/set/<chargername>/<socket>/<key>
         Pattern pattern = Pattern.compile("alfen/set/" + chargerName + "/(\\d+)/(.*)");
         mqttListener.register(pattern, "alfen/set/+/+/+", this);

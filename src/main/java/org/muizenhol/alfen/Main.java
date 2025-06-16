@@ -32,9 +32,9 @@ public class Main {
             return;
         }
         LOG.info("Starting up");
+        mqttHandler.start();
         alfenModbus.start();
         alfenController.start();
-        mqttHandler.start();
     }
 
     public void onStop(@Observes ShutdownEvent shutdownEvent) {

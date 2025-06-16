@@ -23,6 +23,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 import org.muizenhol.alfen.mqtt.MqttTestResource;
+import org.muizenhol.alfen.mqtt.TestMqttServer;
 import org.muizenhol.homeassistant.Discovery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,6 +58,9 @@ public class AlfenModbusClientTest {
     @Inject
     Vertx vertx;
 
+    @MqttTestResource.Server
+    TestMqttServer testMqttServer;
+
     private ModbusTcpClient mockClient;
 
     private AlfenModbusClient alfenModbusClient;
@@ -74,6 +78,7 @@ public class AlfenModbusClientTest {
     void afterEach() {
         mqttHandler.stop();
         alfenModbusClient.close();
+        testMqttServer.cleanup();
     }
 
     private void prepare() throws Exception {

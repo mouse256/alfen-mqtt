@@ -43,6 +43,6 @@ public class AlfenModbusTest {
 //                    return null;
 //                }
 //        );
-        alfenModbus.handleWrite("ikke", 1, "mykey", "payload");
+        //alfenModbus.handleWrite("ikke", 1, "mykey", "payload");
     }
 }

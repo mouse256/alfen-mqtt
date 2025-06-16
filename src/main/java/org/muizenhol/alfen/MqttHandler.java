@@ -1,7 +1,10 @@
 package org.muizenhol.alfen;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import io.vertx.core.Vertx;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.mqtt.MqttClient;
 import io.vertx.mqtt.MqttClientOptions;
 import io.vertx.mqtt.messages.MqttPublishMessage;
@@ -22,7 +25,8 @@ public class MqttHandler {
     private final Vertx vertx;
     private MqttClient mqttClient;
     private volatile boolean started = false;
-    private MqttConfig mqttConfig;
+    private final MqttConfig mqttConfig;
+    private final ObjectMapper objectMapper;
 
     private final List<Subscriber> listeners = new ArrayList<>();
 
@@ -30,12 +34,13 @@ public class MqttHandler {
         void handleMessage(String topic, Matcher matchedTopic, String payload);
     }
 
-    private record Subscriber(Pattern pattern, String mqttTopic, Listener listener) {
+    private record Subscriber(Pattern pattern, String mqttPattern, Listener listener) {
     }
 
-    public MqttHandler(Vertx vertx, MqttConfig mqttConfig) {
+    public MqttHandler(Vertx vertx, MqttConfig mqttConfig, ObjectMapper objectMapper) {
         this.vertx = vertx;
         this.mqttConfig = mqttConfig;
+        this.objectMapper = objectMapper;
     }
 
 
@@ -52,8 +57,8 @@ public class MqttHandler {
 
         connectMqtt(() -> {
             LOG.info("MQTT ready");
-            started = true;
             subscribe();
+            started = true;
         });
         mqttClient.closeHandler(v -> {
             LOG.info("Mqtt closed, restart");
@@ -100,19 +105,23 @@ public class MqttHandler {
         });
     }
 
-    public void register(Pattern topicPattern, String mqttPattern, Listener listener) {
-        mqttClient.subscribe(mqttPattern, MqttQoS.AT_LEAST_ONCE.value());
+    public synchronized void register(Pattern topicPattern, String mqttPattern, Listener listener) {
         LOG.info("Subscribing to topic {}", mqttPattern);
         listeners.add(new Subscriber(topicPattern, mqttPattern, listener));
+        if (started) {
+            mqttClient.subscribe(mqttPattern, MqttQoS.AT_LEAST_ONCE.value());
+        }
+        // else will be done in subscribe call
     }
 
-    private void subscribe() {
+    private synchronized void subscribe() {
         mqttClient.publishHandler(this::handleMsg);
         listeners.forEach(l -> {
-            LOG.info("Re-Subscribing to topic {}", l.mqttTopic);
+            LOG.info("Re-Subscribing to topic {}", l.mqttPattern);
             mqttClient.subscribe(
-                    l.mqttTopic,
-                    MqttQoS.AT_MOST_ONCE.value()
+                    l.mqttPattern,
+                    MqttQoS.AT_LEAST_ONCE.value(),
+                    ar -> LOG.info("mqtt subscribe result for {}: {}", l.mqttPattern, ar)
             );
         });
     }
@@ -127,10 +136,38 @@ public class MqttHandler {
         listeners.forEach(t -> {
             Matcher m = t.pattern.matcher(msg.topicName());
             if (m.matches()) {
-                LOG.warn("Dispatching to {}", t.mqttTopic);
+                LOG.warn("Dispatching to {}", t.mqttPattern);
                 t.listener.handleMessage(msg.topicName(), m, msg.payload().toString());
             }
         });
+    }
 
+    public void publishJson(String topic, Object payload) {
+        publishJson(topic, payload, false);
+    }
+
+    public void publishJson(String topic, Object payload, boolean retain) {
+        try {
+            Buffer buffer = Buffer.buffer(objectMapper.writer().writeValueAsBytes(payload));
+            publish(topic, buffer, retain);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public void publish(String topic, Buffer payload, boolean retain) {
+        mqttClient.publish(topic, payload, MqttQoS.AT_LEAST_ONCE, false, retain);
+    }
+
+    public void publish(String topic, Buffer payload) {
+        publish(topic, payload, false);
+    }
+
+    public void publish(String topic, String payload) {
+        mqttClient.publish(topic, Buffer.buffer(payload), MqttQoS.AT_LEAST_ONCE, false, false);
+    }
+
+    public boolean isStarted() {
+        return started;
     }
 }
