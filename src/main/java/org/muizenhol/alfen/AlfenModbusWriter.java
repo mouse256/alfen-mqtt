@@ -3,11 +3,14 @@ package org.muizenhol.alfen;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.vertx.core.Vertx;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.invoke.MethodHandles;
 import java.time.Instant;
+import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -16,12 +19,14 @@ public class AlfenModbusWriter implements AutoCloseable, MqttHandler.Listener {
     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
     private static final String KEY_MODE = "mode";
     private final AlfenModbusClient client;
-    private final int socket;
     private final String chargerName;
-    private final MqttHandler mqttHandler;
     private final PowerUsage powerUsage = new PowerUsage();
     private final PowerUsage powerSolar = new PowerUsage();
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final Vertx vertx;
+    private ChargeMode chargeMode;
+    private final long timerId;
+    private final int socket;
 
     public enum ChargeMode {
         NO_CHARGE,
@@ -38,12 +43,12 @@ public class AlfenModbusWriter implements AutoCloseable, MqttHandler.Listener {
 
     //private ChargeMode chargeMode = ChargeMode.PV_ONLY; //default mode
 
-    public AlfenModbusWriter(AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttListener) {
+    public AlfenModbusWriter(Vertx vertx, AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttListener) {
         LOG.info("Creating AlfenModbusWriter for {} (socket {})", chargerName, socket);
         this.client = client;
+        this.vertx = vertx;
         this.socket = socket;
         this.chargerName = chargerName;
-        this.mqttHandler = mqttListener;
         // topic: alfen/set/<chargername>/<socket>/<key>
         Pattern pattern = Pattern.compile("alfen/set/" + chargerName + "/(\\d+)/(.*)");
         mqttListener.register(pattern, "alfen/set/+/+/+", this);
@@ -81,11 +86,12 @@ public class AlfenModbusWriter implements AutoCloseable, MqttHandler.Listener {
                 LOG.warn("Json parse exception", e);
             }
         });
+        timerId = vertx.setPeriodic(1_000, this::update);
     }
 
     @Override
     public void close() {
-
+        vertx.cancelTimer(timerId);
     }
 
     @Override
@@ -103,18 +109,38 @@ public class AlfenModbusWriter implements AutoCloseable, MqttHandler.Listener {
         LOG.info("Incoming set message for {} ({}): {} -> {}", chargerName, socket, key, payload);
         if (key.equalsIgnoreCase(KEY_MODE)) {
             try {
-                ChargeMode chargeMode = ChargeMode.valueOf(payload.toUpperCase());
-                switch (chargeMode) {
-                    case NO_CHARGE -> client.disable(socket);
-                    case PV_ONLY -> client.setState(socket, 6, 1);
-                    case PV_AND_MIN -> client.setState(socket, 6, 1);
-                    case FAST -> client.setState(socket, 6, 3);
-                }
+                chargeMode = ChargeMode.valueOf(payload.toUpperCase());
+
             } catch (IllegalArgumentException e) {
                 LOG.warn("Unknown charge mode for {}: {}", topic, payload);
             }
         } else {
             LOG.warn("Invalid mode: {}", topic);
+        }
+    }
+
+    private void update(Long aLong) {
+        LOG.debug("update");
+        int powerGrid;
+        synchronized (powerUsage) {
+            powerGrid =  powerUsage.produced - powerUsage.consumed;
+        }
+        Optional<Integer> chargerPowerConsumedOpt = client.getSocketRealPowerSum(socket);
+        if (chargerPowerConsumedOpt.isEmpty()) {
+            LOG.warn("No socker power measurement for socket {}", socket);
+            return;
+        }
+        int chargerPowerConsumed = chargerPowerConsumedOpt.get();
+        int powerAvailable = powerGrid +  chargerPowerConsumed;
+        LOG.debug("Power grid: {}, consumed: {}, available: {}", powerGrid, chargerPowerConsumed, powerAvailable);
+
+
+
+        switch (chargeMode) {
+            case NO_CHARGE -> client.disable(socket);
+            case PV_ONLY -> client.setState(socket, 6, 1);
+            case PV_AND_MIN -> client.setState(socket, 6, 1);
+            case FAST -> client.setState(socket, 6, 3);
         }
     }
 }

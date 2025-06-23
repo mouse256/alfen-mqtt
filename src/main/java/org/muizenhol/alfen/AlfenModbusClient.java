@@ -17,7 +17,9 @@ import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.*;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -31,7 +33,7 @@ public class AlfenModbusClient implements AutoCloseable {
     private final MqttPublisher mqttPublisher;
     private final boolean writeEnabled;
     private final MqttHandler mqttListener;
-    private final List<AlfenModbusWriter> writers = new ArrayList<>();
+    private final Map<Integer, AlfenModbusWriter> writers = new HashMap<>();
 
     /**
      * States to set/write. Indexed per socket.
@@ -42,6 +44,11 @@ public class AlfenModbusClient implements AutoCloseable {
      * Last state read. Indexed per socket
      */
     private final Map<Integer, Map<Integer, Object>> socketStatus = new HashMap<>();
+
+    /**
+     * Last socket measurement read. Indexed per socket
+     */
+    private final Map<Integer, Map<Integer, Object>> socketMeasurement = new HashMap<>();
 
 
     private record SetState(boolean enabled, float maxCurrent, int numPhases) {
@@ -81,12 +88,12 @@ public class AlfenModbusClient implements AutoCloseable {
 
         if (pollEnabled) {
             vertx.setPeriodic(0, Duration.ofSeconds(1).toMillis(), this::poll);
-            if (writeEnabled) {
-                LOG.info("Startup: write enabled");
-                vertx.setPeriodic(0, Duration.ofSeconds(10).toMillis(), this::pollWrite);
-            } else {
-                LOG.info("Startup: write disabled");
-            }
+//            if (writeEnabled) {
+//                LOG.info("Startup: write enabled");
+//                vertx.setPeriodic(0, Duration.ofSeconds(10).toMillis(), this::pollWrite);
+//            } else {
+//                LOG.info("Startup: write disabled");
+//            }
         }
     }
 
@@ -97,7 +104,7 @@ public class AlfenModbusClient implements AutoCloseable {
         } catch (ModbusExecutionException e) {
             LOG.debug("Error stopping modbus client", e);
         }
-        writers.forEach(AlfenModbusWriter::close);
+        writers.values().forEach(AlfenModbusWriter::close);
         writers.clear();
     }
 
@@ -117,15 +124,15 @@ public class AlfenModbusClient implements AutoCloseable {
         readData();
     }
 
-    private void pollWrite(long l) {
-        //ModBus has a safety that you need to keep writing.
-        //If the connection drops, it will fall back to a default value.
-        LOG.debug("Write loop...");
-        vertx.executeBlocking(() -> {
-            //writeData();
-            return null;
-        });
-    }
+//    private void pollWrite(long l) {
+//        //ModBus has a safety that you need to keep writing.
+//        //If the connection drops, it will fall back to a default value.
+//        LOG.debug("Write loop...");
+//        vertx.executeBlocking(() -> {
+//            //writeData();
+//            return null;
+//        });
+//    }
 
     private synchronized void readData() {
         readData(ModbusConst.PRODUCT_IDENTIFICATION, ModbusConst.ADDR_GENERIC, true);
@@ -136,7 +143,8 @@ public class AlfenModbusClient implements AutoCloseable {
                 LOG.debug("NrOfSockets: {}", nrOfSocketsInt);
                 for (int i = 1; i <= nrOfSocketsInt; ++i) {
                     final int socket = i;
-                    readData(ModbusConst.SOCKET_MEASUREMENT, i, true);
+                    readData(ModbusConst.SOCKET_MEASUREMENT, i, true)
+                            .ifPresent(s -> socketMeasurement.put(socket, s));
                     readData(ModbusConst.STATUS, i, true)
                             .ifPresent(s -> socketStatus.put(socket, s));
                 }
@@ -288,7 +296,7 @@ public class AlfenModbusClient implements AutoCloseable {
         }
 
         for (int s = 1; s <= nrOfSockets; s++) {
-            writers.add(new AlfenModbusWriter(this, name, s, mqttListener));
+            writers.put(s, new AlfenModbusWriter(vertx, this, name, s, mqttListener));
 
             Map<String, Discovery.Component> components = ModbusConst.SOCKET_MEASUREMENT.items().stream()
                     .filter(i -> i.discoveryInfo() != null)
@@ -333,17 +341,25 @@ public class AlfenModbusClient implements AutoCloseable {
     }
 
     public void setState(int socket, float maxCurrent, int numPhases) {
-        if (!writeEnabled) {
-            return;
-        }
-
         LOG.info("Set socket {} to enabled, maxCurrent: {}, numPhases: {}", socket, maxCurrent, numPhases);
         setStates.put(socket, new SetState(true, maxCurrent, numPhases));
 
         writeData();
     }
 
+    public synchronized Optional<Integer> getSocketRealPowerSum(int socket) {
+        Map<Integer, Object> measure = socketMeasurement.get(socket);
+        if (measure == null) {
+            return Optional.empty();
+        }
+        return Optional.of(Math.round((Float) measure.get(ModbusConst.ITEM_REAL_POWER_SUM.start())));
+    }
+
     private synchronized void writeData() {
+        if (!writeEnabled) {
+            return;
+        }
+        pollRead(); //update state
         setStates.forEach((socket, state) -> {
             LOG.debug("Writing state for socket {} ({})", socket, state);
             if (state.enabled) {

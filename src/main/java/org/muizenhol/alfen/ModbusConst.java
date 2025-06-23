@@ -45,6 +45,9 @@ public class ModbusConst {
     public static final int ADDR_GENERIC = 200;
     public static final int ID_NR_OF_SOCKETS = 1105;
     public static final int ID_STATION_SERIAL_NUMBER = 157;
+    public static final int ID_SOCKET_MAX_CURRENT = 1210;
+    public static final int ID_NUM_PHASES = 1215;
+    public static final int ID_REAL_POWER_SUM = 344;
 
     public enum StartOffset {
         PRODUCT_IDENTIFICATION(100),
@@ -90,6 +93,7 @@ public class ModbusConst {
                     new Item("Nr of sockets", ID_NR_OF_SOCKETS, 1, DataType.UNSIGNED16)
             ));
 
+    public static final Item ITEM_REAL_POWER_SUM = new Item("Real Power Sum", ID_REAL_POWER_SUM, 2, DataType.FLOAT32, Item.POWER_WATT);
     /**
      * Socket specific data. To be read once per socket
      */
@@ -117,7 +121,7 @@ public class ModbusConst {
                     new Item("Real Power Phase L1", 338, 2, DataType.FLOAT32),
                     new Item("Real Power Phase L2", 340, 2, DataType.FLOAT32),
                     new Item("Real Power Phase L3", 342, 2, DataType.FLOAT32),
-                    new Item("Real Power Sum", 344, 2, DataType.FLOAT32, Item.POWER_WATT),
+                    ITEM_REAL_POWER_SUM,
                     new Item("Apparent Power Phase L1", 346, 2, DataType.FLOAT32),
                     new Item("Apparent Power Phase L2", 348, 2, DataType.FLOAT32),
                     new Item("Apparent Power Phase L3", 350, 2, DataType.FLOAT32),
@@ -144,8 +148,8 @@ public class ModbusConst {
                     //new Item("Reactive Energy Sum", 422, 4, DataType.FLOAT64) //seems problematic reading out this value
             ));
 
-    public static final Item ITEM_MAX_CURRENT = new Item("Modbus Slave Max Current", 1210, 2, DataType.FLOAT32, Item.CURRENT_2);
-    public static final Item ITEM_NUM_PHASES = new Item("Charge using 1 or 3 phases", 1215, 1, DataType.UNSIGNED16);
+    public static final Item ITEM_MAX_CURRENT = new Item("Modbus Slave Max Current", ID_SOCKET_MAX_CURRENT, 2, DataType.FLOAT32, Item.CURRENT_2);
+    public static final Item ITEM_NUM_PHASES = new Item("Charge using 1 or 3 phases", ID_NUM_PHASES, 1, DataType.UNSIGNED16);
     /**
      * Socket specific data. To be read once per socket
      */

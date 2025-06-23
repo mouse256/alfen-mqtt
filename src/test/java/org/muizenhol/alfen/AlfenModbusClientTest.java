@@ -9,13 +9,10 @@ import io.netty.handler.codec.mqtt.MqttQoS;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
-import io.smallrye.reactive.messaging.mqtt.MqttMessage;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.mqtt.MqttClient;
 import jakarta.inject.Inject;
-import org.eclipse.microprofile.reactive.messaging.Message;
-import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -66,9 +63,13 @@ public class AlfenModbusClientTest {
     private AlfenModbusClient alfenModbusClient;
     private static final float testFloatValue = 78.45f;
     private static final String DEVICE_NAME = "test1";
+    private int numPhases;
+    private float socketMaxCurrent;
 
     @BeforeEach
     void setup() {
+        numPhases = 2;
+        socketMaxCurrent = 0;
         mockClient = Mockito.mock(ModbusTcpClient.class);
         mqttHandler.start();
         alfenModbusClient = new AlfenModbusClient(vertx, DEVICE_NAME, mockClient, true, mqttPublisher, mqttHandler);
@@ -164,17 +165,34 @@ public class AlfenModbusClientTest {
 
         LOG.info("publish");
         client.publish("alfen/set/" + DEVICE_NAME + "/1/mode", Buffer.buffer("PV_ONLY"), MqttQoS.AT_LEAST_ONCE, false, false);
+
+        //setting mode to PV_ONLY will enable the power to 6A an 1 phase
         ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
         verify(mockClient, timeout(2_000).times(2)).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
         assertThat(argumentCaptor.getAllValues().size(), equalTo(2));
 
         WriteMultipleRegistersRequest first = argumentCaptor.getAllValues().getFirst();
-        assertThat(first.address(), equalTo(1210)); //max current
+
+        assertThat(first.address(), equalTo(ModbusConst.ITEM_MAX_CURRENT.start())); //max current
         assertThat(ByteBuffer.wrap(first.values()).getFloat(), equalTo(6f)); //6 amp
 
-        WriteMultipleRegistersRequest sec = argumentCaptor.getAllValues().get(1);
-        assertThat(sec.address(), equalTo(1215));
-        assertThat(getShort(ByteBuffer.wrap(sec.values())), equalTo(1)); //1 phase
+        verifyNumPhases(argumentCaptor.getAllValues().get(1), 1); //1 phase
+
+        // every 1 sec the values will be updated. The num phases did not change.
+        ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor2 = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
+        verify(mockClient, timeout(2_000).times(3)).writeMultipleRegisters(anyInt(), argumentCaptor2.capture());
+        assertThat(argumentCaptor2.getAllValues().size(), equalTo(3));
+
+        WriteMultipleRegistersRequest third = argumentCaptor2.getAllValues().get(2);
+
+        assertThat(third.address(), equalTo(ModbusConst.ITEM_MAX_CURRENT.start())); //max current
+        assertThat(ByteBuffer.wrap(third.values()).getFloat(), equalTo(6f)); //6 amp
+    }
+
+    private void verifyNumPhases(WriteMultipleRegistersRequest sec, int expected) {
+        assertThat(sec.address(), equalTo(ModbusConst.ITEM_NUM_PHASES.start()));
+        assertThat(getShort(ByteBuffer.wrap(sec.values())), equalTo(expected)); //1 phase
+        numPhases = expected;
     }
 
     private int getShort(ByteBuffer buf) {
@@ -208,8 +226,10 @@ public class AlfenModbusClientTest {
         LOG.debug("Allocating {} -- {} -- {}", i.name(), i.type(), i.size());
         ByteBuffer buf = ByteBuffer.allocate(i.size() * 2);
         switch (i.start()) {
-            case (ModbusConst.ID_NR_OF_SOCKETS) -> buf.putShort((short) 1);
-            case (344) -> buf.putFloat(testFloatValue); //real power sum
+            case ModbusConst.ID_NR_OF_SOCKETS -> buf.putShort((short) 1);
+            case ModbusConst.ID_REAL_POWER_SUM -> buf.putFloat(testFloatValue); //real power sum
+            case ModbusConst.ID_SOCKET_MAX_CURRENT -> buf.putFloat(socketMaxCurrent);
+            case ModbusConst.ID_NUM_PHASES -> buf.putShort((short) numPhases);
             default -> {
                 switch (i.type()) {
                     case STRING -> buf.put("x".getBytes(StandardCharsets.UTF_8));
