@@ -21,7 +21,7 @@ import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 import org.muizenhol.alfen.mqtt.MqttTestResource;
 import org.muizenhol.alfen.mqtt.TestMqttServer;
-import org.muizenhol.homeassistant.Discovery;
+import org.muizenhol.homeassistant.discovery.Discovery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -164,7 +164,7 @@ public class AlfenModbusClientTest {
         client.connect(mqttConfig.port(), mqttConfig.host()).toCompletionStage().toCompletableFuture().join();
 
         LOG.info("publish");
-        client.publish("alfen/set/" + DEVICE_NAME + "/1/mode", Buffer.buffer("PV_ONLY"), MqttQoS.AT_LEAST_ONCE, false, false);
+        client.publish("alfen/set/" + DEVICE_NAME + "/1/mode", Buffer.buffer("PV_AND_MIN"), MqttQoS.AT_LEAST_ONCE, false, false);
 
         //setting mode to PV_ONLY will enable the power to 6A an 1 phase
         ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);

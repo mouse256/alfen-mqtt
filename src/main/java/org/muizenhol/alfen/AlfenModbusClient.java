@@ -8,7 +8,9 @@ import com.digitalpetri.modbus.pdu.WriteMultipleRegistersRequest;
 import com.digitalpetri.modbus.pdu.WriteMultipleRegistersResponse;
 import com.digitalpetri.modbus.tcp.client.NettyTcpClientTransport;
 import io.vertx.core.Vertx;
-import org.muizenhol.homeassistant.Discovery;
+import org.muizenhol.homeassistant.discovery.Discovery;
+import org.muizenhol.homeassistant.discovery.component.Component;
+import org.muizenhol.homeassistant.discovery.component.Sensor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -298,18 +300,18 @@ public class AlfenModbusClient implements AutoCloseable {
         for (int s = 1; s <= nrOfSockets; s++) {
             writers.put(s, new AlfenModbusWriter(vertx, this, name, s, mqttListener));
 
-            Map<String, Discovery.Component> components = ModbusConst.SOCKET_MEASUREMENT.items().stream()
+            Map<String, Component> components = ModbusConst.SOCKET_MEASUREMENT.items().stream()
                     .filter(i -> i.discoveryInfo() != null)
-                    .map(i -> new Discovery.Component(
-                            i.name(),
-                            "socket_measurement_" + i.start(),
-                            Discovery.Component.Platform.SENSOR,
-                            i.discoveryInfo().deviceClass(),
-                            i.discoveryInfo().stateClass(),
-                            i.discoveryInfo().unit(),
-                            i.discoveryInfo().precision(),
-                            "{{ value_json.S" + i.start() + " }}"
-                    )).collect(Collectors.toMap(Discovery.Component::uniqueId, i -> i));
+                    .map(i -> new Sensor.Builder()
+                            .withName(i.name())
+                            .withUniqueId("socket_measurement_" + i.start())
+                            .withDeviceClass(i.discoveryInfo().deviceClass())
+                            .withStateClass(i.discoveryInfo().stateClass())
+                            .withUnitOfMeasurement(i.discoveryInfo().unit())
+                            .withSuggestedDisplayPrecision(i.discoveryInfo().precision())
+                            .withValueTemplate("{{ value_json.S" + i.start() + " }}")
+                            .build()
+                    ).collect(Collectors.toMap(Component::getUniqueId, i -> i));
             String uuid = serial + "-" + s;
             Discovery discovery = new Discovery(
                     new Discovery.Device(
@@ -334,9 +336,11 @@ public class AlfenModbusClient implements AutoCloseable {
 
 
     public void disable(int socket) {
-        LOG.info("Set socket {} to disabled", socket);
-        setStates.put(socket, new SetState(false, 0, 1));
+        if (Optional.ofNullable(setStates.get(socket)).map(SetState::enabled).isEmpty()) {
+            LOG.info("Set socket {} to disabled", socket);
+            setStates.put(socket, new SetState(false, 0, 1));
 
+        }
         writeData();
     }
 

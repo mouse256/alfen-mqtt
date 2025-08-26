@@ -1,13 +1,10 @@
 package org.muizenhol.alfen;
 
-import io.netty.handler.codec.mqtt.MqttQoS;
-import io.smallrye.reactive.messaging.mqtt.MqttMessage;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.muizenhol.alfen.data.Evcc;
 import org.muizenhol.alfen.data.PropertyParsed;
-import org.muizenhol.homeassistant.Discovery;
-import org.muizenhol.homeassistant.DiscoveryHelper;
+import org.muizenhol.homeassistant.discovery.Discovery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

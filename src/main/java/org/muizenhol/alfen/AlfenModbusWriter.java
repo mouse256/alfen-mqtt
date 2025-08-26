@@ -23,7 +23,7 @@ public class AlfenModbusWriter implements AutoCloseable {
     private final PowerUsage powerSolar = new PowerUsage();
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Vertx vertx;
-    private ChargeMode chargeMode;
+    private ChargeMode chargeMode = ChargeMode.OFF;
     private final long timerId;
     private final int socket;
     public static final String TOPIC_POWER_CONSUMED = "slimmelezer/sensor/power_consumed/state";
@@ -62,7 +62,7 @@ public class AlfenModbusWriter implements AutoCloseable {
         mqttListener.register(Pattern.compile(TOPIC_POWER_PRODUCED), TOPIC_POWER_PRODUCED, this::handlePowerProduced);
         mqttListener.register(Pattern.compile(TOPIC_SOLAR), TOPIC_SOLAR, this::handleSolar);
         if (enableTimer) {
-            timerId = vertx.setPeriodic(1_000, this::update);
+            timerId = vertx.setPeriodic(5_000, this::update);
         } else {
             timerId = 0;
         }
@@ -147,7 +147,14 @@ public class AlfenModbusWriter implements AutoCloseable {
 
         switch (chargeMode) {
             case OFF -> client.disable(socket);
-            case PV_ONLY -> client.setState(socket, 6, 1);
+            case PV_ONLY -> {
+                if (powerAvailable > 300) {
+                    double amps = Math.max(6.0, powerAvailable / 230.);
+                    client.setState(socket, (float) amps, 1);
+                } else {
+                    client.disable(socket);
+                }
+            }
             case PV_AND_MIN -> client.setState(socket, 6, 1);
             case FAST -> client.setState(socket, 6, 3);
         }

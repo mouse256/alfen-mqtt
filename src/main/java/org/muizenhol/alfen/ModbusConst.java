@@ -1,7 +1,9 @@
 package org.muizenhol.alfen;
 
 
-import org.muizenhol.homeassistant.Discovery;
+import org.muizenhol.homeassistant.discovery.DeviceClass;
+import org.muizenhol.homeassistant.discovery.Discovery;
+import org.muizenhol.homeassistant.discovery.StateClass;
 
 import java.util.List;
 
@@ -31,15 +33,15 @@ public class ModbusConst {
             this(name, start, size, type, null);
         }
 
-        public record DiscoveryInfo(Discovery.Component.DeviceClass deviceClass,
-                                    Discovery.Component.StateClass stateClass, String unit, int precision) {
+        public record DiscoveryInfo(DeviceClass deviceClass,
+                                    StateClass stateClass, String unit, int precision) {
         }
 
-        public static final DiscoveryInfo POWER_WATT = new DiscoveryInfo(Discovery.Component.DeviceClass.POWER, Discovery.Component.StateClass.MEASUREMENT, "W", 0);
-        public static final DiscoveryInfo VOLTAGE = new DiscoveryInfo(Discovery.Component.DeviceClass.VOLTAGE, Discovery.Component.StateClass.MEASUREMENT, "V", 0);
-        public static final DiscoveryInfo CURRENT_2 = new DiscoveryInfo(Discovery.Component.DeviceClass.CURRENT, Discovery.Component.StateClass.MEASUREMENT, "A", 2);
-        public static final DiscoveryInfo FREQUENCY_2 = new DiscoveryInfo(Discovery.Component.DeviceClass.FREQUENCY, Discovery.Component.StateClass.MEASUREMENT, "Hz", 2);
-        public static final DiscoveryInfo ENERGY = new DiscoveryInfo(Discovery.Component.DeviceClass.ENERGY, Discovery.Component.StateClass.TOTAL_INCREASING, "Wh", 0);
+        public static final DiscoveryInfo POWER_WATT = new DiscoveryInfo(DeviceClass.POWER, StateClass.MEASUREMENT, "W", 0);
+        public static final DiscoveryInfo VOLTAGE = new DiscoveryInfo(DeviceClass.VOLTAGE, StateClass.MEASUREMENT, "V", 0);
+        public static final DiscoveryInfo CURRENT_2 = new DiscoveryInfo(DeviceClass.CURRENT, StateClass.MEASUREMENT, "A", 2);
+        public static final DiscoveryInfo FREQUENCY_2 = new DiscoveryInfo(DeviceClass.FREQUENCY, StateClass.MEASUREMENT, "Hz", 2);
+        public static final DiscoveryInfo ENERGY = new DiscoveryInfo(DeviceClass.ENERGY, StateClass.TOTAL_INCREASING, "Wh", 0);
     }
 
     public static final int ADDR_GENERIC = 200;

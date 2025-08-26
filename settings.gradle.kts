@@ -8,3 +8,5 @@ pluginManagement {
     }
 }
 rootProject.name="alfen-mqtt"
+
+includeBuild("../homeassistant-discovery")

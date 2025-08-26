@@ -14,6 +14,7 @@ dependencies {
     implementation("io.quarkus:quarkus-messaging-mqtt")
     implementation("io.quarkus:quarkus-resteasy-jackson")
     implementation("io.quarkus:quarkus-arc")
+    implementation("org.muizenhol:homeassistant-discovery:1.0.0")
     //implementation(libs.zeroconf)
     implementation("com.digitalpetri.modbus:modbus-tcp:2.1.0")
     testImplementation("io.quarkus:quarkus-junit5")
