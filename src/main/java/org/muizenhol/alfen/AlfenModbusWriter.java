@@ -44,11 +44,7 @@ public class AlfenModbusWriter implements AutoCloseable {
         Instant lastUpdate = Instant.EPOCH;
     }
 
-    public AlfenModbusWriter(Vertx vertx, AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttListener) {
-        this(vertx, client, chargerName, socket, mqttListener, true);
-    }
-
-    public AlfenModbusWriter(Vertx vertx, AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttListener, boolean enableTimer) {
+    public AlfenModbusWriter(Vertx vertx, AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttListener, WriterConfig writerConfig) {
         LOG.info("Creating AlfenModbusWriter for {} (socket {})", chargerName, socket);
         this.client = client;
         this.vertx = vertx;
@@ -61,8 +57,8 @@ public class AlfenModbusWriter implements AutoCloseable {
         mqttListener.register(Pattern.compile(TOPIC_POWER_CONSUMED), TOPIC_POWER_CONSUMED, this::handlePowerConsumed);
         mqttListener.register(Pattern.compile(TOPIC_POWER_PRODUCED), TOPIC_POWER_PRODUCED, this::handlePowerProduced);
         mqttListener.register(Pattern.compile(TOPIC_SOLAR), TOPIC_SOLAR, this::handleSolar);
-        if (enableTimer) {
-            timerId = vertx.setPeriodic(5_000, this::update);
+        if (writerConfig.enabled()) {
+            timerId = vertx.setPeriodic(writerConfig.interval().toMillis(), this::update);
         } else {
             timerId = 0;
         }

@@ -34,6 +34,7 @@ public class AlfenModbusClient implements AutoCloseable {
     private final String name;
     private final MqttPublisher mqttPublisher;
     private final boolean writeEnabled;
+    private final WriterConfig writerConfig;
     private final MqttHandler mqttListener;
     private final Map<Integer, AlfenModbusWriter> writers = new HashMap<>();
 
@@ -56,17 +57,18 @@ public class AlfenModbusClient implements AutoCloseable {
     private record SetState(boolean enabled, float maxCurrent, int numPhases) {
     }
 
-    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener) {
+    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
         this.vertx = vertx;
         this.client = client;
         this.name = name;
         this.mqttPublisher = mqttPublisher;
         this.mqttListener = mqttListener;
         this.writeEnabled = writeEnabled;
+        this.writerConfig = writerConfig;
     }
 
-    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener) {
-        this(vertx, deviceConfig.name(), createClient(deviceConfig), writeEnabled, mqttPublisher, mqttListener);
+    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
+        this(vertx, deviceConfig.name(), createClient(deviceConfig), writeEnabled, mqttPublisher, mqttListener, writerConfig);
         start(true);
     }
 
@@ -298,7 +300,7 @@ public class AlfenModbusClient implements AutoCloseable {
         }
 
         for (int s = 1; s <= nrOfSockets; s++) {
-            writers.put(s, new AlfenModbusWriter(vertx, this, name, s, mqttListener));
+            writers.put(s, new AlfenModbusWriter(vertx, this, name, s, mqttListener, writerConfig));
 
             Map<String, Component> components = ModbusConst.SOCKET_MEASUREMENT.items().stream()
                     .filter(i -> i.discoveryInfo() != null)

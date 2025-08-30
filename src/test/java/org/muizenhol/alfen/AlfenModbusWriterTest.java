@@ -7,6 +7,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
+import java.time.Duration;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -42,8 +43,19 @@ public class AlfenModbusWriterTest {
         mqttHandler = Mockito.mock(MqttHandler.class);
         vertx = Mockito.mock(Vertx.class);
         chargerPowerConsumed = null;
+        WriterConfig writerConfig = new WriterConfig() {
+            @Override
+            public boolean enabled() {
+                return false;
+            }
 
-        writer = new AlfenModbusWriter(null, client, CHARGER_NAME, SOCKET, mqttHandler, false);
+            @Override
+            public Duration interval() {
+                return Duration.ofMillis(100);
+            }
+        };
+
+        writer = new AlfenModbusWriter(null, client, CHARGER_NAME, SOCKET, mqttHandler, writerConfig);
 
         listenerSet = registerMock(AlfenModbusWriter.TOPIC_SET);
         listenerPowerConsumed = registerMock(AlfenModbusWriter.TOPIC_POWER_CONSUMED);

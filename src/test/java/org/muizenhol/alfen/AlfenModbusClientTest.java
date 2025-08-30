@@ -53,6 +53,9 @@ public class AlfenModbusClientTest {
     MqttConfig mqttConfig;
 
     @Inject
+    WriterConfig writerConfig;
+
+    @Inject
     Vertx vertx;
 
     @MqttTestResource.Server
@@ -72,7 +75,7 @@ public class AlfenModbusClientTest {
         socketMaxCurrent = 0;
         mockClient = Mockito.mock(ModbusTcpClient.class);
         mqttHandler.start();
-        alfenModbusClient = new AlfenModbusClient(vertx, DEVICE_NAME, mockClient, true, mqttPublisher, mqttHandler);
+        alfenModbusClient = new AlfenModbusClient(vertx, DEVICE_NAME, mockClient, true, mqttPublisher, mqttHandler, writerConfig);
     }
 
     @AfterEach
@@ -168,7 +171,7 @@ public class AlfenModbusClientTest {
 
         //setting mode to PV_ONLY will enable the power to 6A an 1 phase
         ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
-        verify(mockClient, timeout(2_000).times(2)).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
+        verify(mockClient, timeout(10_000).times(2)).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
         assertThat(argumentCaptor.getAllValues().size(), equalTo(2));
 
         WriteMultipleRegistersRequest first = argumentCaptor.getAllValues().getFirst();
@@ -180,7 +183,7 @@ public class AlfenModbusClientTest {
 
         // every 1 sec the values will be updated. The num phases did not change.
         ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor2 = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
-        verify(mockClient, timeout(2_000).times(3)).writeMultipleRegisters(anyInt(), argumentCaptor2.capture());
+        verify(mockClient, timeout(10_000).times(3)).writeMultipleRegisters(anyInt(), argumentCaptor2.capture());
         assertThat(argumentCaptor2.getAllValues().size(), equalTo(3));
 
         WriteMultipleRegistersRequest third = argumentCaptor2.getAllValues().get(2);
