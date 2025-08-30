@@ -1,24 +1,48 @@
 package org.muizenhol.alfen;
 
-
+import io.quarkus.test.common.QuarkusTestResource;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import java.lang.invoke.MethodHandles;
-import java.nio.ByteBuffer;
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
 
+@QuarkusTest
+@QuarkusTestResource(value = ModbusTestResource.class, restrictToAnnotatedClass = true)
 public class AlfenModbusTest {
 
-    private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+    @Inject
+    AlfenModbus alfenModbus;
+
+    @ModbusTestResource.InjectMock
+    MockAlfenModbusDevice mockAlfenDevice;
+
+    @BeforeEach
+    public void beforeEach() {
+        alfenModbus.start();
+    }
+
+    @AfterEach
+    public void afterEach() {
+        alfenModbus.stop();
+    }
 
     @Test
-    public void writeFloatTest() {
-        float testValue = 6;
-        ModbusConst.Item item = ModbusConst.ITEM_MAX_CURRENT;
-        ByteBuffer buf = ByteBuffer.allocate(item.size() * 2);
-        buf.putFloat(testValue);
-        byte[] values = buf.array();
-        LOG.info("out: {}", values);
+    public void test1() throws Exception {
+//        HttpClient.newHttpClient().send(
+//                HttpRequest.newBuilder().GET().uri(URI.create("http://127.0.0.1:5502/")).build(),
+//                responseInfo -> {
+//                    responseInfo.statusCode();
+//                    return null;
+//                }
+//        );
+        //alfenModbus.handleWrite("ikke", 1, "mykey", "payload");
     }
 }

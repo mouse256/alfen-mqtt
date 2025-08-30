@@ -2,13 +2,13 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.annotation.PostConstruct;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.*;
+import org.muizenhol.alfen.AlfenController;
 import org.muizenhol.alfen.data.Categories;
 import org.muizenhol.alfen.data.PropertyCatRsp;
 import org.muizenhol.alfen.data.PropertyParsed;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.List;
@@ -20,14 +20,18 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.CoreMatchers.is;
 
 @QuarkusTest
-@QuarkusTestResource(MockAlfenDeviceResource.class)
+@QuarkusTestResource(value = MockAlfenDeviceResource.class, restrictToAnnotatedClass = true)
 public class ResourceTest {
 
     @InjectMockAlfenDevice
     private MockAlfenDevice mockAlfenDevice;
 
     @Inject
-    private ObjectMapper objectMapper;
+    ObjectMapper objectMapper;
+
+    @Inject
+    AlfenController alfenController;
+
     private static List<Tuple> ids;
     private static PropertyCatRsp propertyCat1a;
     private static PropertyCatRsp propertyCat1b;
@@ -84,6 +88,7 @@ public class ResourceTest {
 
     @BeforeEach
     public void beforeEach() throws JsonProcessingException {
+        alfenController.start();
         String cats = objectMapper.writeValueAsString(dummyCategories);
         mockAlfenDevice.setCategoriesFunction(ctx -> ctx.response().end(cats));
         mockAlfenDevice.setPropertiesFunction(ctx -> {
@@ -108,6 +113,12 @@ public class ResourceTest {
             }
         });
     }
+
+    @AfterEach
+    public void afterEach() {
+        alfenController.stop();
+    }
+
 
     @Test
     public void testCategoriesInvalidDevice() throws JsonProcessingException {

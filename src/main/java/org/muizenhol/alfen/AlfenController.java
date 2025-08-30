@@ -1,10 +1,8 @@
 package org.muizenhol.alfen;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.NotFoundException;
@@ -39,8 +37,14 @@ public class AlfenController {
 
     private Properties ids;
     private Map<String, AlfenConnection> devices = Collections.emptyMap();
+    boolean init = false;
+    private long timerId;
 
-    public void onStart(@Observes StartupEvent startupEvent) {
+    public void start() {
+        if (init) {
+            throw new IllegalStateException("init already done");
+        }
+        init = true;
         List<AlfenConfig.Device> deviceConfig = alfenConfig.devices().stream()
                 .filter(d -> d.type() == AlfenConfig.DeviceType.HTTP)
                 .toList();
@@ -62,10 +66,16 @@ public class AlfenController {
                 .collect(Collectors.toMap(AlfenConfig.Device::name,
                         d -> new AlfenConnection(d, objectMapper)));
 
-        vertx.setPeriodic(100, Duration.ofSeconds(5).toMillis(),
+        timerId = vertx.setPeriodic(100, Duration.ofSeconds(5).toMillis(),
                 e -> deviceConfig.forEach(
                         device -> CATEGORIES.forEach(
                                 category -> poll(device, category))));
+    }
+
+    public void stop() {
+        vertx.cancelTimer(timerId);
+        devices.clear();
+        init = false;
     }
 
     private AlfenConnection getConn(String device) {

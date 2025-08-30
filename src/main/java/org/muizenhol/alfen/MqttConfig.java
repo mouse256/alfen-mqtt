@@ -9,4 +9,6 @@ public interface MqttConfig {
     int port();
 
     boolean enabled();
+
+    String clientId();
 }
