@@ -11,7 +11,8 @@ repositories {
 
 dependencies {
     implementation(enforcedPlatform(libs.quarkus.bom))
-    implementation("io.quarkus:quarkus-messaging-mqtt")
+    //implementation("io.quarkus:quarkus-messaging-mqtt")
+    implementation("io.vertx:vertx-mqtt")
     implementation("io.quarkus:quarkus-resteasy-jackson")
     implementation("io.quarkus:quarkus-arc")
     implementation("org.muizenhol:homeassistant-discovery:1.0.0")
@@ -22,6 +23,7 @@ dependencies {
     testImplementation("io.vertx:vertx-web")
     testImplementation("io.quarkus:quarkus-vertx")
     testImplementation("io.quarkus:quarkus-junit5-mockito")
+    runtimeOnly("org.jboss.slf4j:slf4j-jboss-logmanager")
 }
 
 group = "org.acme"

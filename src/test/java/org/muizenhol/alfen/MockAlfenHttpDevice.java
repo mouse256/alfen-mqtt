@@ -1,3 +1,5 @@
+package org.muizenhol.alfen;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
@@ -10,14 +12,14 @@ import org.slf4j.LoggerFactory;
 import java.lang.invoke.MethodHandles;
 import java.util.function.Function;
 
-public class MockAlfenDevice implements AutoCloseable {
+public class MockAlfenHttpDevice implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private final HttpServer server;
     private final Router router;
 
-    public MockAlfenDevice(Vertx vertx, int port) {
+    public MockAlfenHttpDevice(Vertx vertx, int port) {
         try {
             server = vertx.createHttpServer();
 

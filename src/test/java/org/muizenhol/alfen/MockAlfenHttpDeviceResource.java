@@ -1,16 +1,26 @@
+package org.muizenhol.alfen;
+
 import io.quarkus.test.common.QuarkusTestResourceLifecycleManager;
 import io.vertx.core.Vertx;
-import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
 import java.lang.invoke.MethodHandles;
 import java.util.Map;
 
-public class MockAlfenDeviceResource implements QuarkusTestResourceLifecycleManager {
+public class MockAlfenHttpDeviceResource implements QuarkusTestResourceLifecycleManager {
     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
     private static final int PORT = 54741; //TODO find free port
-    private MockAlfenDevice mockAlfenDevice;
+    private MockAlfenHttpDevice mockAlfenDevice;
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.FIELD)
+    public @interface InjectMockAlfenDevice {
+    }
 
     @Override
     public Map<String, String> start() {
@@ -36,8 +46,8 @@ public class MockAlfenDeviceResource implements QuarkusTestResourceLifecycleMana
     public void inject(TestInjector testInjector) {
         LOG.info("Inject");
         Vertx vertx = Vertx.vertx();
-        mockAlfenDevice = new MockAlfenDevice(vertx, PORT);
+        mockAlfenDevice = new MockAlfenHttpDevice(vertx, PORT);
         testInjector.injectIntoFields(mockAlfenDevice,
-                new TestInjector.AnnotatedAndMatchesType(InjectMockAlfenDevice.class, MockAlfenDevice.class));
+                new TestInjector.AnnotatedAndMatchesType(InjectMockAlfenDevice.class, MockAlfenHttpDevice.class));
     }
 }

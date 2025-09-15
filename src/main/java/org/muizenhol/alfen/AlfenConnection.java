@@ -47,7 +47,7 @@ public class AlfenConnection {
                     config.password().orElseThrow(() -> new IllegalArgumentException("password not set for " + config.name())),
                     "alfen-mqtt");
             String loginStr = objectMapper.writeValueAsString(login);
-            URI uri = new URI("https://" + config.endpoint() + "/api/login");
+            URI uri = new URI(config.endpoint() + "/api/login");
             LOG.info("Login URI: {}", uri);
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(uri)

@@ -1,11 +1,11 @@
+package org.muizenhol.alfen;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.quarkus.test.junit.QuarkusTest;
-import jakarta.annotation.PostConstruct;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.*;
-import org.muizenhol.alfen.AlfenController;
 import org.muizenhol.alfen.data.Categories;
 import org.muizenhol.alfen.data.PropertyCatRsp;
 import org.muizenhol.alfen.data.PropertyParsed;
@@ -20,11 +20,15 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.CoreMatchers.is;
 
 @QuarkusTest
-@QuarkusTestResource(value = MockAlfenDeviceResource.class, restrictToAnnotatedClass = true)
-public class ResourceTest {
+@QuarkusTestResource(value = MockAlfenHttpDeviceResource.class, restrictToAnnotatedClass = true)
+/**
+ * Tests http endpoints.
+ * Uses http alfen client as backend
+ */
+public class ResourceHttpTest {
 
-    @InjectMockAlfenDevice
-    private MockAlfenDevice mockAlfenDevice;
+    @MockAlfenHttpDeviceResource.InjectMockAlfenDevice
+    private MockAlfenHttpDevice mockAlfenDevice;
 
     @Inject
     ObjectMapper objectMapper;
@@ -45,7 +49,7 @@ public class ResourceTest {
     @BeforeAll
     public static void beforeAll() throws IOException {
         Properties props = new Properties();
-        props.load(ResourceTest.class.getResourceAsStream("/ids.properties"));
+        props.load(ResourceHttpTest.class.getResourceAsStream("/ids.properties"));
         ids = props.entrySet().stream()
                 .map(e -> new Tuple((String) e.getKey(), (String) e.getValue()))
                 .collect(Collectors.toList());
