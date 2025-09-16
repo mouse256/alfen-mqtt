@@ -25,6 +25,7 @@ public class MqttHandler {
     private final Vertx vertx;
     private MqttClient mqttClient;
     private volatile boolean started = false;
+    private volatile boolean stopped = false;
     private final MqttConfig mqttConfig;
     private final ObjectMapper objectMapper;
 
@@ -87,6 +88,7 @@ public class MqttHandler {
     public void stop() {
         LOG.info("Stopping");
         started = false;
+        stopped = true;
         //consumer.unregister()
         if (mqttClient.isConnected()) {
             mqttClient.disconnect();
@@ -94,6 +96,10 @@ public class MqttHandler {
     }
 
     private void restart() {
+        if (stopped) {
+            //nothing to do
+            return;
+        }
         if (!started) {
             LOG.warn("Cannot restart, not yet running");
             return;

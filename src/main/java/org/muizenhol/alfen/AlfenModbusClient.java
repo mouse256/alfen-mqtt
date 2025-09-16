@@ -7,6 +7,7 @@ import com.digitalpetri.modbus.pdu.ReadHoldingRegistersResponse;
 import com.digitalpetri.modbus.pdu.WriteMultipleRegistersRequest;
 import com.digitalpetri.modbus.pdu.WriteMultipleRegistersResponse;
 import com.digitalpetri.modbus.tcp.client.NettyTcpClientTransport;
+import io.quarkus.runtime.Quarkus;
 import io.vertx.core.Vertx;
 import org.muizenhol.homeassistant.discovery.Discovery;
 import org.muizenhol.homeassistant.discovery.component.Component;
@@ -37,6 +38,8 @@ public class AlfenModbusClient implements AutoCloseable {
     private final WriterConfig writerConfig;
     private final MqttHandler mqttListener;
     private final Map<Integer, AlfenModbusWriter> writers = new HashMap<>();
+    private long readCount = 0;
+    private int errorCount = 0;
 
     /**
      * States to set/write. Indexed per socket.
@@ -119,7 +122,18 @@ public class AlfenModbusClient implements AutoCloseable {
     private void poll(long l) {
         LOG.debug("Polling...");
         vertx.executeBlocking(() -> {
-            pollRead();
+            try {
+                pollRead();
+                readCount++;
+                errorCount = 0;
+            } catch (Exception e) {
+                errorCount++;
+                LOG.warn("Error polling of modbus client", e);
+                if (errorCount > 3) {
+                    LOG.error("3 times in a row a read error, quitting");
+                    Quarkus.asyncExit(100);
+                }
+            }
             return null;
         });
     }
