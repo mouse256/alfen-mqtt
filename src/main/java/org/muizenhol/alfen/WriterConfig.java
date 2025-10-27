@@ -14,4 +14,7 @@ public interface WriterConfig {
     @WithDefault("PT5s")
     Duration interval();
 
+    @WithDefault("6")
+    int minPower();
+
 }
