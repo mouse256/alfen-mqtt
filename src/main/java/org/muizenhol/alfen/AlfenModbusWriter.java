@@ -30,6 +30,7 @@ public class AlfenModbusWriter implements AutoCloseable {
     public static final String TOPIC_POWER_PRODUCED = "slimmelezer/sensor/power_produced/state";
     public static final String TOPIC_SOLAR = "serialread/power";
     public static final String TOPIC_SET = "alfen/set/+/+/+";
+    private final WriterConfig config;
 
     public enum ChargeMode {
         OFF,
@@ -50,6 +51,7 @@ public class AlfenModbusWriter implements AutoCloseable {
         this.vertx = vertx;
         this.socket = socket;
         this.chargerName = chargerName;
+        this.config = writerConfig;
         // topic: alfen/set/<chargername>/<socket>/<key>
         Pattern pattern = Pattern.compile("alfen/set/" + chargerName + "/(\\d+)/(.*)");
 
@@ -145,13 +147,13 @@ public class AlfenModbusWriter implements AutoCloseable {
             case OFF -> client.disable(socket);
             case PV_ONLY -> {
                 if (powerAvailable > 300) {
-                    double amps = Math.max(6.0, powerAvailable / 230.);
+                    double amps = Math.max(config.minPower(), powerAvailable / 230.);
                     client.setState(socket, (float) amps, 1);
                 } else {
                     client.disable(socket);
                 }
             }
-            case PV_AND_MIN -> client.setState(socket, 6, 1);
+            case PV_AND_MIN -> client.setState(socket, (float) Math.max(config.minPower(), powerAvailable / 230.), 1);
             case FAST -> client.setState(socket, 6, 3);
         }
     }

@@ -53,6 +53,11 @@ public class AlfenModbusWriterTest {
             public Duration interval() {
                 return Duration.ofMillis(100);
             }
+
+            @Override
+            public int minPower() {
+                return 6;
+            }
         };
 
         writer = new AlfenModbusWriter(null, client, CHARGER_NAME, SOCKET, mqttHandler, writerConfig);
@@ -139,8 +144,50 @@ public class AlfenModbusWriterTest {
         writer.update(1L);
         checkSetState(6f);
 
+        //still the same
         writer.update(1L);
         checkSetState(6f);
 
+        //more power available
+        writeEnergy(2300, 0);
+        writer.update(1L);
+        checkSetState(10f); //2300W / 230V = 10A
+
+        //still the same
+        writer.update(1L);
+        checkSetState(10f);
+
+        //no more power available
+        writeEnergy(0, 400);
+        writer.update(1L);
+        checkDisabled();
+    }
+
+    @Test
+    public void testPvAndMinOnly() {
+        // charger = off
+        chargerPowerConsumed = 0;
+        write("PV_AND_MIN");
+        writer.update(1L);
+        // minimal power supply
+        checkSetState(6f);
+
+        //still the same
+        writer.update(1L);
+        checkSetState(6f);
+
+        //more power available
+        writeEnergy(2300, 0);
+        writer.update(1L);
+        checkSetState(10f); //2300W / 230V = 10A
+
+        //still the same
+        writer.update(1L);
+        checkSetState(10f);
+
+        //no more power available, should go to min power mode
+        writeEnergy(0, 400);
+        writer.update(1L);
+        checkSetState(6f);
     }
 }
