@@ -1,60 +1,64 @@
-# code-with-quarkus
+# Alfen-mqtt
 
-This project uses Quarkus, the Supersonic Subatomic Java Framework.
+This project connects to [Alfen](https://alfen.com/en) charging points and exposes the data over MQTT.
+It's currently tested with an Alfen eve pro, other models may or may not work.
 
-If you want to learn more about Quarkus, please visit its website: https://quarkus.io/ .
+## Running
 
-## Running the application in dev mode
-
-You can run your application in dev mode that enables live coding using:
-```shell script
-./gradlew quarkusDev
+The easiest way to run this project is to use the pre-built docker image:
+```aiignore
+# check the latest version from the releases page
+docker run ghcr.io/mouse256/alfen-mqtt:1.2.4
 ```
 
-> **_NOTE:_**  Quarkus now ships with a Dev UI, which is available in dev mode only at http://localhost:8080/q/dev/.
+There are 2 modes in which this tool can communicate with the alfen chargepoint: `http` or `modbus`
 
-## Packaging and running the application
+### modbus mode
+This is the recommended mode.
 
-The application can be packaged using:
-```shell script
-./gradlew build
+In this mode, it uses the modbus protocol to connect to the charging point. It's a more advanced/complex protocol.
+
+The disadvantage of this mode is that you need this option to be activated on your charging point. It can be validated in the eve-pro app if this is activated.
+
+### http mode
+In this mode, it uses the http endpoints exposed by the charging point. This uses the same protocol the alfen mobile app uses.
+
+The advantage of this mode is that every charging point supports this.
+The disadvantage is that you can only have 1 client connected at the same time. So you can't use the mobile app and this tool at the same time.
+
+## Configuration options
+This project is built with [Quarkus](https://quarkus.io), which means it follow the conventions there to configure it.
+
+The built-in configuration can be found in the [application.properties](src/main/resources/application.properties) file.
+Every item in there can be overruled by passing it as an [environment variable](https://quarkus.io/guides/config-reference#environment-variables)
+
+Sample running with configuration options
+```aiignore
+docker run \
+  --name alfen-mqtt \
+  -e ALFEN_DEVICES_1__ENDPOINT="192.168.1.58" \
+  -e ALFEN_DEVICES_1__TYPE="modbus" \
+  -e MQTT_HOST=192.168.1.152 \
+  -e MQTT_PORT=1883 \
+  ghcr.io/mouse256/alfen-mqtt:1.2.4
 ```
-It produces the `quarkus-run.jar` file in the `build/quarkus-app/` directory.
-Be aware that it’s not an _über-jar_ as the dependencies are copied into the `build/quarkus-app/lib/` directory.
 
-The application is now runnable using `java -jar build/quarkus-app/quarkus-run.jar`.
+## Advanced docker mode
 
-If you want to build an _über-jar_, execute the following command:
-```shell script
-./gradlew build -Dquarkus.package.type=uber-jar
+Besides the regular docker image, there is also a docker image provided which contains only the jar files, no JVM.
+This can be used if you want to use the JVM from the host for a more light-weight image.
+
+```aiignore
+docker run \
+  --name alfen-mqtt \
+  -e ALFEN_DEVICES_1__ENDPOINT="192.168.1.58" \
+  -e ALFEN_DEVICES_1__TYPE="modbus" \
+  -e MQTT_HOST=192.168.1.152 \
+  -e MQTT_PORT=1883 \
+  --mount type=bind,src=/usr,dst=/usr \
+  --mount type=bind,src=/lib,dst=/lib \
+  --mount type=bind,src=/lib64,dst=/lib64 \
+  --mount type=bind,src=/etc/alternatives,dst=/etc/alternatives \
+  --mount type=tmpfs,dst=/tmp \
+  ghcr.io/mouse256/alfen-mqtt:1.2.4-scratch
 ```
-
-The application, packaged as an _über-jar_, is now runnable using `java -jar build/*-runner.jar`.
-
-## Creating a native executable
-
-You can create a native executable using: 
-```shell script
-./gradlew build -Dquarkus.package.type=native
-```
-
-Or, if you don't have GraalVM installed, you can run the native executable build in a container using: 
-```shell script
-./gradlew build -Dquarkus.package.type=native -Dquarkus.native.container-build=true
-```
-
-You can then execute your native executable with: `./build/code-with-quarkus-1.0.0-SNAPSHOT-runner`
-
-If you want to learn more about building native executables, please consult https://quarkus.io/guides/gradle-tooling.
-
-## Related Guides
-
-- REST Client Classic ([guide](https://quarkus.io/guides/rest-client)): Call REST services
-
-## Provided Code
-
-### REST Client
-
-Invoke different services through REST with JSON
-
-[Related guide section...](https://quarkus.io/guides/rest-client)
