@@ -43,6 +43,10 @@ docker run \
   ghcr.io/mouse256/alfen-mqtt:1.2.4
 ```
 
+## HomeAssistant/OpenHab integration
+
+The tool exposes MQTT discovery information, so the device gets picked up by HomeAssistant/OpenHab automatically.
+
 ## Advanced docker mode
 
 Besides the regular docker image, there is also a docker image provided which contains only the jar files, no JVM.
