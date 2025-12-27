@@ -75,7 +75,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
           flavor: |
             latest=auto
-            suffix=scratch,onlatest=<true
+            suffix=scratch,onlatest=true
       - name: Build and push scratch image
         uses: docker/build-push-action@v6
         with:
