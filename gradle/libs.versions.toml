@@ -1,5 +1,5 @@
 [versions]
-quarkus = "3.35.0"
+quarkus = "3.35.2"
 zeroconf = "1.3.2"
 
 [plugins]
