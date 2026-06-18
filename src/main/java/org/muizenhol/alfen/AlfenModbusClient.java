@@ -334,7 +334,8 @@ public class AlfenModbusClient implements AutoCloseable {
                             uuid,
                             "mouse256",
                             "alfen",
-                            "alfen-mqtt"
+                            "alfen-mqtt",
+                            null
                     )
                     , new Discovery.Origin(
                     "alfen-mqtt"
