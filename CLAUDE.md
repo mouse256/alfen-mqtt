@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Important information
+
+No guessing. If something is unclear, ask for user input to clarify the question.
+Make sure the specification is clear before doing an implementation.
+If a new feature is added, update CLAUDE.md
+
 ## Overview
 
 Quarkus (Java 25) application that polls Alfen EV charging points and republishes their data over MQTT, including Home Assistant / OpenHAB MQTT auto-discovery. A charge point can be read in two independent modes — **modbus** (recommended, TCP, supports writing/control) and **http** (Alfen's mobile-app API, read-only here, single client only).
@@ -46,6 +52,18 @@ Notable flags: `modbus.write_enabled` (gates all modbus writes/control, default 
 - **Modbus mode** — `AlfenModbus` creates one `AlfenModbusClient` per modbus device. `AlfenModbusClient` (the largest/most complex class) holds the digitalpetri Modbus TCP connection, polls holding registers, maintains per-socket `socketStatus`/`socketMeasurement`/`setStates`, publishes readings + HA discovery, and — when `writeEnabled` — drives `AlfenModbusWriter` to write desired charge state (enable, max current, phase count) back to registers in response to MQTT control messages. `ModbusConst` holds register addresses/layouts.
 
 Register maps, property id mappings, and HA discovery component definitions are the domain-specific heart of the app; the rest is plumbing.
+
+### Charging controller (load management)
+
+`AlfenModbusWriter` (one instance per socket, created by `AlfenModbusClient`) is an evcc-style load manager that decides whether to charge and at what current/phase count, then drives the charger via `AlfenModbusClient.setState`/`disable`. It is gated by both `modbus.write_enabled` and `writer.enabled` (`WriterConfig`, prefix `writer`).
+
+Inputs over MQTT:
+- **mode** on `alfen/set/<charger>/<socket>/mode` — one of `OFF`, `PV_ONLY` (only charge on solar surplus), `PV_AND_MIN` (always at least min current, faster on surplus), `FAST` (as fast as the grid budget allows).
+- **grid power** on the configurable `writer.grid-consumed-topic` / `writer.grid-produced-topic` (payloads in kW). Net grid power is the only signal used; there is no separate solar input.
+
+The control loop (`update`, every `writer.interval`) computes `powerAvailable = (produced - consumed) + chargerDraw` (the solar surplus excluding the charger itself) and applies, in order: a stale-input guard (`writer.input-timeout`), a spike guard (immediate stop + cooldown when grid import exceeds `writer.max-grid-power` × (1 + `writer.spike-percent`/100)), start/stop debounce (`writer.start-delay`/`writer.stop-delay`), a post-stop `writer.cooldown`, and target current/phase selection clamped to `[writer.min-current, writer.max-current]`. Phase count auto-switches 1↔3 (debounced by `writer.phase-switch-delay`) based on whether the budget sustains the 3-phase minimum. `PV_ONLY` starts above `writer.solar-start-power` export and stops below `writer.solar-stop-power` import. Controller status is published to `alfen/controller/<charger>/<socket>`.
+
+All time-based decisions use an injectable `Supplier<Instant>` clock so `AlfenModbusWriterTest` can drive them with simulated time.
 
 ## Testing
 

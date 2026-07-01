@@ -167,6 +167,9 @@ public class AlfenModbusClientTest {
         client.connect(mqttConfig.port(), mqttConfig.host()).toCompletionStage().toCompletableFuture().join();
 
         LOG.info("publish");
+        //provide a fresh grid reading so the controller doesn't treat the input as stale
+        client.publish(writerConfig.gridProducedTopic(), Buffer.buffer("0"), MqttQoS.AT_LEAST_ONCE, false, false);
+        client.publish(writerConfig.gridConsumedTopic(), Buffer.buffer("0"), MqttQoS.AT_LEAST_ONCE, false, false);
         client.publish("alfen/set/" + DEVICE_NAME + "/1/mode", Buffer.buffer("PV_AND_MIN"), MqttQoS.AT_LEAST_ONCE, false, false);
 
         //setting mode to PV_ONLY will enable the power to 6A an 1 phase
