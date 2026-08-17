@@ -18,7 +18,7 @@ dependencies {
     //implementation("io.quarkus:quarkus-container-image-jib")
     implementation("org.muizenhol:homeassistant-discovery:1.0.0")
     //implementation(libs.zeroconf)
-    implementation("com.digitalpetri.modbus:modbus-tcp:2.1.5")
+    implementation("com.digitalpetri.modbus:modbus-tcp:2.1.6")
     testImplementation("io.quarkus:quarkus-junit5")
     testImplementation("io.rest-assured:rest-assured")
     testImplementation("io.vertx:vertx-web")
