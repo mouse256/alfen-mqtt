@@ -15,6 +15,8 @@ dependencies {
     implementation("io.vertx:vertx-mqtt")
     implementation("io.quarkus:quarkus-resteasy-jackson")
     implementation("io.quarkus:quarkus-arc")
+    implementation("io.quarkus:quarkus-arc-dev")
+    implementation("io.quarkus:quarkus-devui")
     //implementation("io.quarkus:quarkus-container-image-jib")
     implementation("org.muizenhol:homeassistant-discovery:1.0.0")
     //implementation(libs.zeroconf)
