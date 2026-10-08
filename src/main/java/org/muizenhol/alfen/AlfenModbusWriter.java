@@ -116,7 +116,12 @@ public class AlfenModbusWriter implements AutoCloseable {
     private void handleSolar(String topic, Matcher matchedTopic, String payload) {
         try {
             JsonNode jsonNode = objectMapper.readTree(payload);
-            double power = jsonNode.get("data").get("Power_real_1_3").asDouble();
+            JsonNode powerNode = jsonNode.path("data").path("Power_real_1_3");
+            if (!powerNode.isNumber()) {
+                LOG.warn("Solar message on {} has no numeric data.Power_real_1_3: {}", topic, payload);
+                return;
+            }
+            double power = powerNode.asDouble();
             LOG.debug("Received power solar message: {} -- {}", payload, power);
             synchronized (powerSolar) {
                 powerSolar.produced = (int) power;
