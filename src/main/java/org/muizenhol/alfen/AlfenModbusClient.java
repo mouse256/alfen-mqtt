@@ -23,6 +23,10 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -38,6 +42,12 @@ public class AlfenModbusClient implements AutoCloseable {
     private final WriterConfig writerConfig;
     private final MqttHandler mqttListener;
     private final Map<Integer, AlfenModbusWriter> writers = new HashMap<>();
+    /**
+     * All modbus I/O (polling and writing) runs on this single thread, so it never blocks the vert.x
+     * event loop and reads/writes are naturally serialized.
+     */
+    private final ExecutorService modbusExecutor;
+    private long pollTimerId = -1;
     private long readCount = 0;
     private int errorCount = 0;
 
@@ -50,19 +60,19 @@ public class AlfenModbusClient implements AutoCloseable {
     private volatile long lastPollSuccessMs = 0;
 
     /**
-     * States to set/write. Indexed per socket.
+     * States to set/write. Indexed per socket. Updated from the event loop, written from the modbus thread.
      */
-    private final Map<Integer, SetState> setStates = new HashMap<>();
+    private final Map<Integer, SetState> setStates = new ConcurrentHashMap<>();
 
     /**
-     * Last state read. Indexed per socket
+     * Last state read. Indexed per socket. Updated from the modbus thread, read from the event loop.
      */
-    private final Map<Integer, Map<Integer, Object>> socketStatus = new HashMap<>();
+    private final Map<Integer, Map<Integer, Object>> socketStatus = new ConcurrentHashMap<>();
 
     /**
-     * Last socket measurement read. Indexed per socket
+     * Last socket measurement read. Indexed per socket. Updated from the modbus thread, read from the event loop.
      */
-    private final Map<Integer, Map<Integer, Object>> socketMeasurement = new HashMap<>();
+    private final Map<Integer, Map<Integer, Object>> socketMeasurement = new ConcurrentHashMap<>();
 
 
     private record SetState(boolean enabled, float maxCurrent, int numPhases) {
@@ -76,6 +86,11 @@ public class AlfenModbusClient implements AutoCloseable {
         this.mqttListener = mqttListener;
         this.writeEnabled = writeEnabled;
         this.writerConfig = writerConfig;
+        this.modbusExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "modbus-" + name);
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
@@ -102,7 +117,7 @@ public class AlfenModbusClient implements AutoCloseable {
         }
 
         if (pollEnabled) {
-            vertx.setPeriodic(0, Duration.ofSeconds(1).toMillis(), this::poll);
+            pollTimerId = vertx.setPeriodic(0, Duration.ofSeconds(1).toMillis(), this::poll);
 //            if (writeEnabled) {
 //                LOG.info("Startup: write enabled");
 //                vertx.setPeriodic(0, Duration.ofSeconds(10).toMillis(), this::pollWrite);
@@ -112,8 +127,19 @@ public class AlfenModbusClient implements AutoCloseable {
         }
     }
 
+    private void runOnModbusThread(Runnable task) {
+        try {
+            modbusExecutor.execute(task);
+        } catch (RejectedExecutionException e) {
+            LOG.debug("Modbus client {} is closed, dropping task", name);
+        }
+    }
+
     @Override
     public void close() {
+        if (pollTimerId != -1) {
+            vertx.cancelTimer(pollTimerId);
+        }
         try {
             client.disconnect();
         } catch (ModbusExecutionException e) {
@@ -121,6 +147,7 @@ public class AlfenModbusClient implements AutoCloseable {
         }
         writers.values().forEach(AlfenModbusWriter::close);
         writers.clear();
+        modbusExecutor.shutdownNow();
     }
 
     public String getName() {
@@ -130,7 +157,7 @@ public class AlfenModbusClient implements AutoCloseable {
     private void poll(long l) {
         LOG.debug("Polling...");
         lastPollAttemptMs = System.currentTimeMillis();
-        vertx.executeBlocking(() -> {
+        runOnModbusThread(() -> {
             try {
                 pollRead();
                 readCount++;
@@ -146,7 +173,6 @@ public class AlfenModbusClient implements AutoCloseable {
             } finally {
                 lastPollFinishMs = System.currentTimeMillis();
             }
-            return null;
         });
     }
 
@@ -404,17 +430,17 @@ public class AlfenModbusClient implements AutoCloseable {
             setStates.put(socket, new SetState(false, 0, 1));
 
         }
-        writeData();
+        runOnModbusThread(this::writeData);
     }
 
     public void setState(int socket, float maxCurrent, int numPhases) {
         LOG.info("Set socket {} to enabled, maxCurrent: {}, numPhases: {}", socket, maxCurrent, numPhases);
         setStates.put(socket, new SetState(true, maxCurrent, numPhases));
 
-        writeData();
+        runOnModbusThread(this::writeData);
     }
 
-    public synchronized Optional<Integer> getSocketRealPowerSum(int socket) {
+    public Optional<Integer> getSocketRealPowerSum(int socket) {
         Map<Integer, Object> measure = socketMeasurement.get(socket);
         if (measure == null) {
             return Optional.empty();
@@ -422,11 +448,14 @@ public class AlfenModbusClient implements AutoCloseable {
         return Optional.of(Math.round((Float) measure.get(ModbusConst.ITEM_REAL_POWER_SUM.start())));
     }
 
+    /**
+     * Write the desired state of every socket. Runs on the modbus thread and relies on the socket
+     * status of the last poll (at most ~1s old) instead of re-reading everything before each write.
+     */
     private synchronized void writeData() {
         if (!writeEnabled) {
             return;
         }
-        pollRead(); //update state
         setStates.forEach((socket, state) -> {
             LOG.debug("Writing state for socket {} ({})", socket, state);
             if (state.enabled) {

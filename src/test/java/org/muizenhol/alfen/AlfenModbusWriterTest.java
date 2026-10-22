@@ -77,8 +77,12 @@ public class AlfenModbusWriterTest {
                 return 7400;
             }
 
-            public int spikePercent() {
-                return 10;
+            public Duration overLimitDelay() {
+                return Duration.ofSeconds(30);
+            }
+
+            public int threePhaseMargin() {
+                return 300;
             }
 
             public Duration startDelay() {
@@ -295,19 +299,122 @@ public class AlfenModbusWriterTest {
     }
 
     @Test
-    public void testSpikeImmediateStop() {
-        startCharging("FAST", 0);
+    public void testOverLimitShortSpikeIgnored() {
+        startCharging("PV_AND_MIN", 0);
+        chargerPowerConsumed = 1380;
 
-        // import well over budget+10% (7400 * 1.1 = 8140) -> immediate stop, no debounce
-        grid(-9000);
+        // house load jumps: import 8400W > 7400W budget, but only for 20s
+        grid(-8400);
+        tick();
+        advance(Duration.ofSeconds(20));
+        grid(-8400);
+        tick();
+        verifySetState(6, 1);
+
+        // back under the budget resets the over-limit timer
+        advance(Duration.ofSeconds(5));
+        grid(-1380);
+        tick();
+        advance(Duration.ofSeconds(20));
+        grid(-8400);
+        tick();
+        advance(Duration.ofSeconds(20));
+        grid(-8400);
+        tick();
+        verifySetState(6, 1);
+    }
+
+    @Test
+    public void testOverLimitStopsAtSinglePhaseMinimum() {
+        startCharging("PV_AND_MIN", 0);
+        chargerPowerConsumed = 1380;
+
+        // import over the budget at 1 phase minimum current
+        grid(-8400);
+        tick();
+        verifySetState(6, 1);
+
+        // sustained for the over-limit delay -> stop
+        advance(Duration.ofSeconds(31));
+        grid(-8400);
         tick();
         verifyDisabled();
 
         // cooldown is active even though conditions are fine again
+        chargerPowerConsumed = 0;
         advance(Duration.ofMinutes(2).plusSeconds(1));
         grid(0);
         tick();
         verifyDisabled();
+    }
+
+    @Test
+    public void testOverLimitStepsDownFromThreePhase() {
+        startOnThreePhase();
+
+        // house load rises to 3500W: budget 7400 - 3500 = 3900W can't sustain the 3-phase minimum
+        // (4140W), so the car stays at 3x6A while the phase debounce runs and import is 7640W
+        chargerPowerConsumed = 4140;
+        grid(-7640);
+        tick();
+        verifySetState(6, 3);
+
+        // over the budget for the over-limit delay -> 1 phase right away, well before the 5 min phase debounce
+        advance(Duration.ofSeconds(31));
+        grid(-7640);
+        tick();
+        verifySetState(16, 1); // 3900W / 230V = 17A, clamped to max
+    }
+
+    @Test
+    public void testThreePhaseMargin() {
+        // house uses 3100W: budget 7400 - 3100 = 4300W covers the 3-phase minimum (4140W) but not the margin
+        startCharging("FAST", -3100);
+        grid(-3100);
+        tick();
+        verifySetState(16, 1);
+        advance(Duration.ofMinutes(5).plusSeconds(1));
+        grid(-3100);
+        tick();
+        verifySetState(16, 1);
+
+        // house drops to 2900W: budget 4500W >= 4140 + 300 -> 3 phase after the debounce
+        grid(-2900);
+        tick();
+        advance(Duration.ofMinutes(5).plusSeconds(1));
+        grid(-2900);
+        tick();
+        verifySetState(4500 / (230.0 * 3), 3);
+
+        // budget 4200W: below the switch-up threshold but still covers the 3-phase minimum -> stays 3 phase
+        grid(-3200);
+        tick();
+        advance(Duration.ofMinutes(5).plusSeconds(1));
+        grid(-3200);
+        tick();
+        verifySetState(6.09, 3);
+
+        // budget 4000W: 3-phase minimum not covered -> back to 1 phase after the debounce
+        grid(-3400);
+        tick();
+        advance(Duration.ofMinutes(5).plusSeconds(1));
+        grid(-3400);
+        tick();
+        verifySetState(16, 1);
+    }
+
+    /**
+     * Charge in FAST mode with plenty of budget until the writer switched to 3 phase.
+     */
+    private void startOnThreePhase() {
+        startCharging("FAST", 0);
+        grid(0);
+        tick();
+        advance(config.phaseSwitchDelay().plusSeconds(1));
+        grid(0);
+        tick();
+        verify(client).setState(eq(SOCKET), anyFloat(), eq(3));
+        clearInvocations(client);
     }
 
     @Test

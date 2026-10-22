@@ -172,27 +172,38 @@ public class AlfenModbusClientTest {
         client.publish(writerConfig.gridConsumedTopic(), Buffer.buffer("0"), MqttQoS.AT_LEAST_ONCE, false, false);
         client.publish("alfen/set/" + DEVICE_NAME + "/1/mode", Buffer.buffer("PV_AND_MIN"), MqttQoS.AT_LEAST_ONCE, false, false);
 
-        //setting mode to PV_ONLY will enable the power to 6A an 1 phase
+        //setting mode to PV_AND_MIN will enable the power to 6A and 1 phase
+        //the writer starts in OFF, so there may be some 0A (disabled) writes before the mode arrives
+        verify(mockClient, timeout(10_000)).writeMultipleRegisters(anyInt(), ArgumentMatchers.argThat(r ->
+                r.address() == ModbusConst.ITEM_NUM_PHASES.start()));
         ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
-        verify(mockClient, timeout(10_000).times(2)).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
-        assertThat(argumentCaptor.getAllValues().size(), equalTo(2));
+        verify(mockClient, atLeast(2)).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
+        java.util.List<WriteMultipleRegistersRequest> writes = argumentCaptor.getAllValues().stream()
+                .dropWhile(r -> r.address() == ModbusConst.ITEM_MAX_CURRENT.start() && ByteBuffer.wrap(r.values()).getFloat() == 0f)
+                .toList();
 
-        WriteMultipleRegistersRequest first = argumentCaptor.getAllValues().getFirst();
-
+        WriteMultipleRegistersRequest first = writes.getFirst();
         assertThat(first.address(), equalTo(ModbusConst.ITEM_MAX_CURRENT.start())); //max current
         assertThat(ByteBuffer.wrap(first.values()).getFloat(), equalTo(6f)); //6 amp
 
-        verifyNumPhases(argumentCaptor.getAllValues().get(1), 1); //1 phase
+        verifyNumPhases(writes.get(1), 1); //1 phase
 
-        // every 1 sec the values will be updated. The num phases did not change.
+        // once a poll has seen the new phase count, only the max current keeps being written
+        alfenModbusClient.pollRead();
+        Thread.sleep(500); //let writes queued before the poll drain
+        clearInvocations(mockClient);
         ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor2 = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
-        verify(mockClient, timeout(10_000).times(3)).writeMultipleRegisters(anyInt(), argumentCaptor2.capture());
-        assertThat(argumentCaptor2.getAllValues().size(), equalTo(3));
+        verify(mockClient, timeout(10_000).atLeast(3)).writeMultipleRegisters(anyInt(), argumentCaptor2.capture());
+        for (WriteMultipleRegistersRequest req : argumentCaptor2.getAllValues()) {
+            assertThat(req.address(), equalTo(ModbusConst.ITEM_MAX_CURRENT.start())); //max current
+            assertThat(ByteBuffer.wrap(req.values()).getFloat(), equalTo(6f)); //6 amp
+        }
+    }
 
-        WriteMultipleRegistersRequest third = argumentCaptor2.getAllValues().get(2);
-
-        assertThat(third.address(), equalTo(ModbusConst.ITEM_MAX_CURRENT.start())); //max current
-        assertThat(ByteBuffer.wrap(third.values()).getFloat(), equalTo(6f)); //6 amp
+    private void verifyNumPhases(WriteMultipleRegistersRequest sec, int expected) {
+        assertThat(sec.address(), equalTo(ModbusConst.ITEM_NUM_PHASES.start()));
+        assertThat(getShort(ByteBuffer.wrap(sec.values())), equalTo(expected)); //1 phase
+        numPhases = expected;
     }
 
     @Test
@@ -204,17 +215,33 @@ public class AlfenModbusClientTest {
         alfenModbusClient.setState(1, 10, 1);
         alfenModbusClient.disable(1);
 
-        ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
-        verify(mockClient, atLeastOnce()).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
-        WriteMultipleRegistersRequest last = argumentCaptor.getAllValues().getLast();
-        assertThat(last.address(), equalTo(ModbusConst.ITEM_MAX_CURRENT.start())); //max current
-        assertThat(ByteBuffer.wrap(last.values()).getFloat(), equalTo(0f)); //disabled
+        //writes happen asynchronously on the modbus thread; the disable must end up writing 0A
+        verify(mockClient, timeout(5_000).atLeastOnce()).writeMultipleRegisters(anyInt(), ArgumentMatchers.argThat(r ->
+                r.address() == ModbusConst.ITEM_MAX_CURRENT.start() && ByteBuffer.wrap(r.values()).getFloat() == 0f));
     }
 
-    private void verifyNumPhases(WriteMultipleRegistersRequest sec, int expected) {
-        assertThat(sec.address(), equalTo(ModbusConst.ITEM_NUM_PHASES.start()));
-        assertThat(getShort(ByteBuffer.wrap(sec.values())), equalTo(expected)); //1 phase
-        numPhases = expected;
+    @Test
+    void testStateReadDoesNotWaitForModbus() throws Exception {
+        prepare();
+        alfenModbusClient.pollRead();
+
+        //a slow charge point: every read takes 3s
+        Mockito.doAnswer(invocationOnMock -> {
+            Thread.sleep(3_000);
+            ReadHoldingRegistersRequest req = invocationOnMock.getArgument(1, ReadHoldingRegistersRequest.class);
+            return new ReadHoldingRegistersResponse(makeRegisters(invocationOnMock.getArgument(0, Integer.class), req));
+        }).when(mockClient).readHoldingRegisters(Mockito.anyInt(), Mockito.any());
+        Thread slowRead = new Thread(alfenModbusClient::pollRead);
+        slowRead.start();
+        Thread.sleep(200); //let the slow read grab the client
+
+        //the controller (event loop) must get the last measurement and queue writes without blocking
+        long start = System.nanoTime();
+        assertThat(alfenModbusClient.getSocketRealPowerSum(1).orElseThrow(), equalTo(Math.round(testFloatValue)));
+        alfenModbusClient.setState(1, 10, 1);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+        assertThat(elapsedMs < 500, equalTo(true));
+        slowRead.join();
     }
 
     private int getShort(ByteBuffer buf) {

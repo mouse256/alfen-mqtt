@@ -103,6 +103,41 @@ public class MqttHandlerTest {
         assertThat(resultMap.get(topic3), equalTo(1));
     }
 
+    @Test
+    public void testPublishFromOtherThreads() throws Exception {
+        mqttHandler.start();
+        eventually(() -> mqttHandler.isStarted());
+
+        Set<String> received = Collections.synchronizedSet(new java.util.HashSet<>());
+        MqttClient client = MqttClient.create(vertx);
+        client.publishHandler(msg -> received.add(msg.payload().toString()));
+        client.connect(mqttConfig.port(), mqttConfig.host()).toCompletionStage().toCompletableFuture().join();
+        client.subscribe("/test/threads", MqttQoS.AT_LEAST_ONCE.value()).toCompletionStage().toCompletableFuture().join();
+
+        //publishes from non vert.x threads (like the modbus thread) must all be handed to the mqtt context
+        int threads = 4;
+        int perThread = 25;
+        java.util.List<Thread> publishers = new java.util.ArrayList<>();
+        for (int t = 0; t < threads; t++) {
+            final int id = t;
+            Thread thread = new Thread(() -> {
+                for (int i = 0; i < perThread; i++) {
+                    mqttHandler.publish("/test/threads", id + "-" + i);
+                }
+            });
+            publishers.add(thread);
+            thread.start();
+        }
+        for (Thread thread : publishers) {
+            thread.join();
+        }
+
+        eventually(() -> received.size() == threads * perThread);
+        assertThat(mqttHandler.status().consecutivePublishFailures(), equalTo(0));
+        client.disconnect();
+        mqttHandler.stop();
+    }
+
     private void eventually(Supplier<Boolean> supplier) {
         for (int i = 0; i < 10; i++) {
             if (supplier.get()) {

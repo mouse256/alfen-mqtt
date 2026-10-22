@@ -46,6 +46,7 @@ public class AlfenModbusWriter implements AutoCloseable {
     private Instant stopConditionSince = null;
     private int currentPhases = 1;
     private Instant phaseChangeSince = null;
+    private Instant overLimitSince = null;
 
     public enum ChargeMode {
         OFF,
@@ -182,11 +183,7 @@ public class AlfenModbusWriter implements AutoCloseable {
         int gridImport = -powerGrid;
         LOG.debug("Power grid: {}, charger draw: {}, available: {}", powerGrid, chargerDraw, powerAvailable);
 
-        // Spike guard (all modes): too much import => stop now and enter cooldown.
-        int spikeLimit = (int) (config.maxGridPower() * (1 + config.spikePercent() / 100.0));
-        if (gridImport > spikeLimit) {
-            LOG.warn("Grid import {} W exceeds spike limit {} W, stopping {} ({}) immediately", gridImport, spikeLimit, chargerName, socket);
-            stop(now, true);
+        if (charging && handleOverLimit(now, mode, powerAvailable, gridImport)) {
             return;
         }
 
@@ -247,14 +244,52 @@ public class AlfenModbusWriter implements AutoCloseable {
     }
 
     /**
-     * Compute the target current and phase count and write them to the charger.
+     * Over-limit guard (all modes, while charging): when grid import stays above the budget for
+     * {@link WriterConfig#overLimitDelay()}, step down. On 3 phase switch to 1 phase right away
+     * (bypassing the phase-switch debounce); on 1 phase at minimum current stop with cooldown.
+     * Above the minimum current on 1 phase the normal loop already lowers the current.
+     *
+     * @return true when charging was stopped and this update is done
      */
-    private void applyCharge(Instant now, ChargeMode mode, int powerAvailable) {
-        int chargeBudget = switch (mode) {
+    private boolean handleOverLimit(Instant now, ChargeMode mode, int powerAvailable, int gridImport) {
+        if (gridImport <= config.maxGridPower()) {
+            overLimitSince = null;
+            return false;
+        }
+        if (overLimitSince == null) {
+            overLimitSince = now;
+        }
+        if (Duration.between(overLimitSince, now).compareTo(config.overLimitDelay()) < 0) {
+            return false;
+        }
+        overLimitSince = null;
+        if (currentPhases == 3) {
+            LOG.warn("Grid import {} W over limit {} W for {}, switching {} ({}) to 1 phase", gridImport, config.maxGridPower(), config.overLimitDelay(), chargerName, socket);
+            currentPhases = 1;
+            phaseChangeSince = null;
+            return false;
+        }
+        if (chargeBudget(mode, powerAvailable) / VOLTAGE <= config.minCurrent()) {
+            LOG.warn("Grid import {} W over limit {} W for {} at minimum current, stopping {} ({})", gridImport, config.maxGridPower(), config.overLimitDelay(), chargerName, socket);
+            stop(now, true);
+            return true;
+        }
+        return false;
+    }
+
+    private int chargeBudget(ChargeMode mode, int powerAvailable) {
+        return switch (mode) {
             case PV_ONLY, PV_AND_MIN -> powerAvailable;
             case FAST -> config.maxGridPower() + powerAvailable;
             case OFF -> 0;
         };
+    }
+
+    /**
+     * Compute the target current and phase count and write them to the charger.
+     */
+    private void applyCharge(Instant now, ChargeMode mode, int powerAvailable) {
+        int chargeBudget = chargeBudget(mode, powerAvailable);
 
         int phases = resolvePhases(now, chargeBudget);
         float amps = clampCurrent(chargeBudget / (VOLTAGE * phases));
@@ -263,12 +298,15 @@ public class AlfenModbusWriter implements AutoCloseable {
     }
 
     /**
-     * Decide 1 vs 3 phase charging with its own debounce. 3 phase is only used when the available
-     * budget can sustain the 3-phase minimum for {@link WriterConfig#phaseSwitchDelay()}.
+     * Decide 1 vs 3 phase charging with its own debounce ({@link WriterConfig#phaseSwitchDelay()}).
+     * Switching up requires the budget to cover the 3-phase minimum plus
+     * {@link WriterConfig#threePhaseMargin()}, so a small load increase doesn't immediately push
+     * the import over the limit; switching down happens once the 3-phase minimum isn't covered.
      */
     private int resolvePhases(Instant now, int chargeBudget) {
         int threePhaseMinW = (int) (config.minCurrent() * VOLTAGE * 3);
-        int desiredPhases = chargeBudget >= threePhaseMinW ? 3 : 1;
+        int threshold = currentPhases == 3 ? threePhaseMinW : threePhaseMinW + config.threePhaseMargin();
+        int desiredPhases = chargeBudget >= threshold ? 3 : 1;
         if (desiredPhases == currentPhases) {
             phaseChangeSince = null;
             return currentPhases;
@@ -319,6 +357,7 @@ public class AlfenModbusWriter implements AutoCloseable {
         startConditionSince = null;
         stopConditionSince = null;
         phaseChangeSince = null;
+        overLimitSince = null;
         if (cooldown) {
             lastStop = now;
         }

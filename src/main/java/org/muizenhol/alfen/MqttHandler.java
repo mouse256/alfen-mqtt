@@ -3,6 +3,7 @@ package org.muizenhol.alfen;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.handler.codec.mqtt.MqttQoS;
+import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.mqtt.MqttClient;
@@ -27,6 +28,11 @@ public class MqttHandler {
 
     private final Vertx vertx;
     private MqttClient mqttClient;
+    /**
+     * The vert.x context the current {@link #mqttClient} connected on. The client is not thread safe,
+     * so every interaction with it is run on this context. {@code null} while not connected.
+     */
+    private volatile Context mqttContext;
     private volatile boolean started = false;
     private volatile boolean shuttingDown = false;
     private volatile boolean restarting = false;
@@ -84,7 +90,16 @@ public class MqttHandler {
 
         connectMqtt(() -> {
             LOG.info("MQTT ready");
-            subscribe();
+            mqttContext = Vertx.currentContext();
+            try {
+                subscribe();
+            } catch (Exception e) {
+                // The connection can die again while (re)subscribing; vert.x then throws (NPE on its
+                // internal connection). Start over instead of leaving a half-initialised client.
+                LOG.warn("MQTT subscribe failed, restarting", e);
+                restart();
+                return;
+            }
             consecutivePublishFailures.set(0);
             lastPublishSuccessMs = System.currentTimeMillis();
             started = true;
@@ -124,6 +139,8 @@ public class MqttHandler {
     private void teardown() {
         started = false;
         MqttClient old = mqttClient;
+        Context oldContext = mqttContext;
+        mqttContext = null;
         if (old == null) {
             return;
         }
@@ -135,12 +152,27 @@ public class MqttHandler {
         } catch (Exception e) {
             LOG.debug("Error clearing MQTT handlers", e);
         }
-        try {
-            if (old.isConnected()) {
-                old.disconnect();
+        runOn(oldContext, () -> {
+            try {
+                if (old.isConnected()) {
+                    old.disconnect();
+                }
+            } catch (Exception e) {
+                LOG.debug("Error disconnecting MQTT client", e);
             }
-        } catch (Exception e) {
-            LOG.debug("Error disconnecting MQTT client", e);
+        });
+    }
+
+    /**
+     * Run {@code task} on {@code context}: directly when already on its event loop, otherwise
+     * scheduled onto it. Without a context (not connected) the task runs directly, so calls into the
+     * client fail fast and are accounted for as before.
+     */
+    private static void runOn(Context context, Runnable task) {
+        if (context == null || (Vertx.currentContext() == context && Context.isOnEventLoopThread())) {
+            task.run();
+        } else {
+            context.runOnContext(v -> task.run());
         }
     }
 
@@ -171,7 +203,14 @@ public class MqttHandler {
         LOG.info("Subscribing to topic {}", mqttPattern);
         listeners.add(new Subscriber(topicPattern, mqttPattern, listener));
         if (started) {
-            mqttClient.subscribe(mqttPattern, MqttQoS.AT_LEAST_ONCE.value());
+            MqttClient client = mqttClient;
+            runOn(mqttContext, () -> {
+                try {
+                    client.subscribe(mqttPattern, MqttQoS.AT_LEAST_ONCE.value());
+                } catch (Exception e) {
+                    LOG.warn("MQTT subscribe to {} failed", mqttPattern, e);
+                }
+            });
         }
         // else will be done in subscribe call
     }
@@ -243,14 +282,17 @@ public class MqttHandler {
             onPublishFailure(new IllegalStateException("MQTT client not initialised"));
             return;
         }
-        try {
-            client.publish(topic, payload, MqttQoS.AT_LEAST_ONCE, false, retain)
-                    .onFailure(this::onPublishFailure);
-        } catch (Exception e) {
-            // vert.x can throw synchronously (e.g. NPE on its internal context) once the connection
-            // has silently gone away - treat it like any other publish failure.
-            onPublishFailure(e);
-        }
+        // Publishes come from several threads (e.g. the modbus thread); hand them to the client's context.
+        runOn(mqttContext, () -> {
+            try {
+                client.publish(topic, payload, MqttQoS.AT_LEAST_ONCE, false, retain)
+                        .onFailure(this::onPublishFailure);
+            } catch (Exception e) {
+                // vert.x can throw synchronously (e.g. NPE on its internal context) once the connection
+                // has silently gone away - treat it like any other publish failure.
+                onPublishFailure(e);
+            }
+        });
     }
 
     private void onPublishSuccess() {

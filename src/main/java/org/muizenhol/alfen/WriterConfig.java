@@ -33,17 +33,19 @@ public interface WriterConfig {
     int maxCurrent();
 
     /**
-     * Total grid-import budget in W. The FAST mode never tries to import more than this,
-     * and the spike guard triggers when import exceeds this (plus {@link #spikePercent()}).
+     * Total grid-import budget in W. The FAST mode never tries to import more than this, and while
+     * charging, import above this for {@link #overLimitDelay()} makes the controller step down.
      */
     @WithDefault("7400")
     int maxGridPower();
 
     /**
-     * Percentage above {@link #maxGridPower()} that triggers an immediate stop (no debounce).
+     * How long grid import may stay above {@link #maxGridPower()} while charging before the
+     * controller steps down: 3 phase -> 1 phase immediately, or stop (with cooldown) when already
+     * charging on 1 phase at minimum current.
      */
-    @WithDefault("10")
-    int spikePercent();
+    @WithDefault("PT30S")
+    Duration overLimitDelay();
 
     /**
      * Start conditions must hold this long before charging actually starts.
@@ -68,6 +70,14 @@ public interface WriterConfig {
      */
     @WithDefault("PT5M")
     Duration phaseSwitchDelay();
+
+    /**
+     * Headroom in W on top of the 3-phase minimum charge power before switching from 1 to 3 phase.
+     * Switching back to 1 phase only happens below the 3-phase minimum itself, so in between the
+     * current phase count is kept (hysteresis).
+     */
+    @WithDefault("300")
+    int threePhaseMargin();
 
     /**
      * In PV_ONLY mode: charging may start when the grid would still export at least this many W
