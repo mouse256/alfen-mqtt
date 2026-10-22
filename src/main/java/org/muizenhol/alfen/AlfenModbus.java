@@ -67,4 +67,8 @@ public class AlfenModbus {
         clients.clear();
     }
 
+    public java.util.Collection<AlfenModbusClient> getClients() {
+        return clients.values();
+    }
+
 }

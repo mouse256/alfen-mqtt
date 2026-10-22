@@ -93,5 +93,10 @@ USER 185
 ENV JAVA_OPTS_APPEND="-Dquarkus.http.host=0.0.0.0 -Djava.util.logging.manager=org.jboss.logmanager.LogManager -Xmx16m --sun-misc-unsafe-memory-access=allow"
 ENV JAVA_APP_JAR="/deployments/quarkus-run.jar"
 
+# Returns 503 once the modbus poll loop or the MQTT connection has wedged; combine with
+# `docker run --restart` + autoheal, a compose healthcheck, or a k8s liveness probe.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -fsS http://localhost:8080/health/live || exit 1
+
 ENTRYPOINT [ "/opt/jboss/container/java/run/run-java.sh" ]
 

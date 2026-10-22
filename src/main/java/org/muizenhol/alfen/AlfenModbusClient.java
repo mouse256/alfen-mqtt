@@ -42,6 +42,14 @@ public class AlfenModbusClient implements AutoCloseable {
     private int errorCount = 0;
 
     /**
+     * Poll-loop health, used by {@link HealthResource} to detect a wedged worker (deadlock/hang) or
+     * a charge point that has become unreachable. All in epoch millis, {@code 0} means "never".
+     */
+    private volatile long lastPollAttemptMs = 0;
+    private volatile long lastPollFinishMs = 0;
+    private volatile long lastPollSuccessMs = 0;
+
+    /**
      * States to set/write. Indexed per socket.
      */
     private final Map<Integer, SetState> setStates = new HashMap<>();
@@ -121,11 +129,13 @@ public class AlfenModbusClient implements AutoCloseable {
 
     private void poll(long l) {
         LOG.debug("Polling...");
+        lastPollAttemptMs = System.currentTimeMillis();
         vertx.executeBlocking(() -> {
             try {
                 pollRead();
                 readCount++;
                 errorCount = 0;
+                lastPollSuccessMs = System.currentTimeMillis();
             } catch (Exception e) {
                 errorCount++;
                 LOG.warn("Error polling of modbus client", e);
@@ -133,6 +143,8 @@ public class AlfenModbusClient implements AutoCloseable {
                     LOG.error("3 times in a row a read error, quitting");
                     Quarkus.asyncExit(100);
                 }
+            } finally {
+                lastPollFinishMs = System.currentTimeMillis();
             }
             return null;
         });
@@ -140,6 +152,32 @@ public class AlfenModbusClient implements AutoCloseable {
 
     void pollRead() {
         readData();
+    }
+
+    /**
+     * Millis since the last fully successful poll, or {@code -1} if none has succeeded yet.
+     */
+    public long msSinceLastSuccessfulPoll() {
+        return lastPollSuccessMs == 0 ? -1 : System.currentTimeMillis() - lastPollSuccessMs;
+    }
+
+    /**
+     * Millis the current poll iteration has been running without finishing. A value that keeps
+     * growing means the blocking worker is stuck (deadlock / hung socket read).
+     */
+    public long pollStallMs() {
+        long attempt = lastPollAttemptMs;
+        if (attempt == 0 || attempt <= lastPollFinishMs) {
+            return 0;
+        }
+        return System.currentTimeMillis() - attempt;
+    }
+
+    /**
+     * Whether the poll loop has ever been scheduled (i.e. the client connected and started polling).
+     */
+    public boolean isPolling() {
+        return lastPollAttemptMs != 0;
     }
 
 //    private void pollWrite(long l) {
@@ -153,8 +191,15 @@ public class AlfenModbusClient implements AutoCloseable {
 //    }
 
     private synchronized void readData() {
-        readData(ModbusConst.PRODUCT_IDENTIFICATION, ModbusConst.ADDR_GENERIC, true);
-        readData(ModbusConst.STATION_STATUS, ModbusConst.ADDR_GENERIC, true).ifPresent(values -> {
+        boolean productOk = readData(ModbusConst.PRODUCT_IDENTIFICATION, ModbusConst.ADDR_GENERIC, true).isPresent();
+        Optional<Map<Integer, Object>> stationStatus = readData(ModbusConst.STATION_STATUS, ModbusConst.ADDR_GENERIC, true);
+        if (!productOk && stationStatus.isEmpty()) {
+            // Every read failed (charge point unreachable / connection dead). Propagate so the poll
+            // loop counts consecutive errors and can bail out for a restart, and so this iteration
+            // is not recorded as a successful poll.
+            throw new IllegalStateException("All modbus reads failed for " + name);
+        }
+        stationStatus.ifPresent(values -> {
             Object nrOfSockets = values.get(ModbusConst.ID_NR_OF_SOCKETS);
             if (nrOfSockets != null) {
                 int nrOfSocketsInt = (int) nrOfSockets;
