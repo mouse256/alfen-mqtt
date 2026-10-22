@@ -199,7 +199,7 @@ public class AlfenModbusWriter implements AutoCloseable {
 
     private void handleStart(Instant now, ChargeMode mode, int powerAvailable) {
         boolean wantStart = switch (mode) {
-            case PV_ONLY -> powerAvailable >= config.solarStartPower();
+            case PV_ONLY -> powerAvailable - minChargePower() >= config.solarStartPower();
             case PV_AND_MIN, FAST -> true;
             case OFF -> false;
         };
@@ -226,7 +226,7 @@ public class AlfenModbusWriter implements AutoCloseable {
 
     private void handleCharging(Instant now, ChargeMode mode, int powerAvailable) {
         boolean wantStop = switch (mode) {
-            case PV_ONLY -> powerAvailable <= -config.solarStopPower();
+            case PV_ONLY -> powerAvailable - minChargePower() <= -config.solarStopPower();
             case PV_AND_MIN, FAST -> false;
             case OFF -> true;
         };
@@ -282,6 +282,16 @@ public class AlfenModbusWriter implements AutoCloseable {
             phaseChangeSince = null;
         }
         return currentPhases;
+    }
+
+    /**
+     * Power drawn by the charger at minimum current on a single phase. The PV_ONLY start/stop
+     * thresholds are evaluated against the grid power as it would be with the car charging at this
+     * minimum. Single phase is used because the phase-switch logic falls back to 1 phase when the
+     * 3-phase minimum can't be sustained.
+     */
+    private int minChargePower() {
+        return (int) (config.minCurrent() * VOLTAGE);
     }
 
     private float clampCurrent(double amps) {

@@ -219,27 +219,31 @@ public class AlfenModbusWriterTest {
     public void testPvOnlyThresholds() {
         setMode("PV_ONLY");
 
-        // not enough export to start
-        grid(400);
+        // surplus only just covers the minimum charge power (6A * 230V = 1380W): 1800 - 1380 = 420W
+        // projected export, below the 500W start threshold
+        grid(1800);
         tick();
         verifyDisabled();
 
-        // enough export, but debounce not satisfied
-        grid(600);
+        // projected export 1900 - 1380 = 520W, but debounce not satisfied
+        grid(1900);
         tick();
         verifyDisabled();
 
         advance(Duration.ofMinutes(2).plusSeconds(1));
-        grid(600);
+        grid(1900);
         tick();
-        verifySetState(6, 1); // started, clamped to min current
+        verifySetState(1900 / 230.0, 1);
 
-        // mild import: not over the solar stop threshold -> keep charging
-        grid(-500);
+        // from now on the car draws the minimum, which shows up in the grid reading
+        chargerPowerConsumed = 1380;
+
+        // mild import (surplus 480W): projected import 900W, below the 1000W stop threshold -> keep charging
+        grid(-900);
         tick();
         verifySetState(6, 1);
 
-        // import over stop threshold, but stop debounce not satisfied yet
+        // projected import 1100W, over the stop threshold, but stop debounce not satisfied yet
         grid(-1100);
         tick();
         verifySetState(6, 1);
@@ -252,8 +256,22 @@ public class AlfenModbusWriterTest {
     }
 
     @Test
+    public void testPvOnlyStopsWithoutSolar() {
+        startCharging("PV_ONLY", 1900);
+        chargerPowerConsumed = 1380;
+
+        // no solar at all: the grid imports exactly what the car draws
+        grid(-1380);
+        tick();
+        advance(Duration.ofMinutes(3).plusSeconds(1));
+        grid(-1380);
+        tick();
+        verifyDisabled();
+    }
+
+    @Test
     public void testCooldownBlocksRestart() {
-        startCharging("PV_ONLY", 600);
+        startCharging("PV_ONLY", 1900);
 
         // import beyond stop threshold for the full stop delay -> stop + cooldown
         grid(-1100);
@@ -265,15 +283,15 @@ public class AlfenModbusWriterTest {
 
         // good export again and start delay elapsed, but cooldown blocks restart
         advance(Duration.ofMinutes(2).plusSeconds(1));
-        grid(600);
+        grid(1900);
         tick();
         verifyDisabled();
 
         // once cooldown elapses, charging may resume
         advance(Duration.ofMinutes(3));
-        grid(600);
+        grid(1900);
         tick();
-        verifySetState(6, 1);
+        verifySetState(1900 / 230.0, 1);
     }
 
     @Test

@@ -70,13 +70,15 @@ public interface WriterConfig {
     Duration phaseSwitchDelay();
 
     /**
-     * In PV_ONLY mode: surplus (export) in W above which charging may start.
+     * In PV_ONLY mode: charging may start when the grid would still export at least this many W
+     * with the car charging at minimum current (single phase).
      */
     @WithDefault("500")
     int solarStartPower();
 
     /**
-     * In PV_ONLY mode: import in W above which charging stops.
+     * In PV_ONLY mode: charging stops when the grid would import more than this many W with the
+     * car charging at minimum current (single phase).
      */
     @WithDefault("1000")
     int solarStopPower();

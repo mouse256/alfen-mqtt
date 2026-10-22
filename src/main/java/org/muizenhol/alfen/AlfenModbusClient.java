@@ -398,7 +398,8 @@ public class AlfenModbusClient implements AutoCloseable {
 
 
     public void disable(int socket) {
-        if (Optional.ofNullable(setStates.get(socket)).map(SetState::enabled).isEmpty()) {
+        SetState current = setStates.get(socket);
+        if (current == null || current.enabled()) {
             LOG.info("Set socket {} to disabled", socket);
             setStates.put(socket, new SetState(false, 0, 1));
 

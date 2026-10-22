@@ -195,6 +195,22 @@ public class AlfenModbusClientTest {
         assertThat(ByteBuffer.wrap(third.values()).getFloat(), equalTo(6f)); //6 amp
     }
 
+    @Test
+    void testDisableAfterEnable() throws Exception {
+        prepare();
+        //do 1 read to initialize the socket status
+        alfenModbusClient.pollRead();
+
+        alfenModbusClient.setState(1, 10, 1);
+        alfenModbusClient.disable(1);
+
+        ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
+        verify(mockClient, atLeastOnce()).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
+        WriteMultipleRegistersRequest last = argumentCaptor.getAllValues().getLast();
+        assertThat(last.address(), equalTo(ModbusConst.ITEM_MAX_CURRENT.start())); //max current
+        assertThat(ByteBuffer.wrap(last.values()).getFloat(), equalTo(0f)); //disabled
+    }
+
     private void verifyNumPhases(WriteMultipleRegistersRequest sec, int expected) {
         assertThat(sec.address(), equalTo(ModbusConst.ITEM_NUM_PHASES.start()));
         assertThat(getShort(ByteBuffer.wrap(sec.values())), equalTo(expected)); //1 phase
