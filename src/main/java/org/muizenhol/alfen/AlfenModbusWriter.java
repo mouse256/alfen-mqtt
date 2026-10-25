@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import java.lang.invoke.MethodHandles;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -38,6 +39,8 @@ public class AlfenModbusWriter implements AutoCloseable {
     private final long timerId;
 
     private volatile ChargeMode chargeMode = ChargeMode.OFF;
+    // Set once a mode command was received; from then on the retained mode is no longer restored.
+    private volatile boolean modeCommandReceived = false;
 
     // Per-socket runtime state of the control state machine.
     private boolean charging = false;
@@ -47,12 +50,43 @@ public class AlfenModbusWriter implements AutoCloseable {
     private int currentPhases = 1;
     private Instant phaseChangeSince = null;
     private Instant overLimitSince = null;
+    private float targetCurrent = 0;
+    // Last published controller state, used to log state changes only once.
+    private ControllerState lastState = null;
+    private Instant lastTimerEnd = null;
 
     public enum ChargeMode {
         OFF,
         PV_ONLY,
         PV_AND_MIN,
         FAST
+    }
+
+    /**
+     * What the controller is doing (or waiting for). Published in the status so it is clear why
+     * the charger is or isn't charging.
+     */
+    public enum ControllerState {
+        /** Mode is OFF. */
+        OFF,
+        /** Grid power readings are too old, charging is disabled for safety. */
+        STALE_INPUT,
+        /** No power measurement of the socket available yet. */
+        NO_MEASUREMENT,
+        /** PV_ONLY: not enough solar surplus to start. */
+        WAITING_FOR_SURPLUS,
+        /** PV_ONLY: start conditions hold, waiting for {@link WriterConfig#startDelay()}. */
+        START_DELAY,
+        /** Recently stopped, waiting for {@link WriterConfig#cooldown()} before starting again. */
+        COOLDOWN,
+        /** Charging. */
+        CHARGING,
+        /** Charging, stop conditions hold, waiting for {@link WriterConfig#stopDelay()}. */
+        STOP_DELAY,
+        /** Charging, grid import above the limit, waiting for {@link WriterConfig#overLimitDelay()}. */
+        OVER_LIMIT,
+        /** Charging, waiting for {@link WriterConfig#phaseSwitchDelay()} to switch the phase count. */
+        PHASE_SWITCH_DELAY
     }
 
     private static class PowerUsage {
@@ -63,8 +97,32 @@ public class AlfenModbusWriter implements AutoCloseable {
 
     /**
      * Status published for observability on {@code alfen/controller/<charger>/<socket>}.
+     * {@code timerEnd} is the moment the running timer of {@code state} (start delay, cooldown,
+     * ...) expires, as ISO-8601 instant, or null when no timer is running.
      */
-    public record ControllerStatus(String mode, boolean charging, float targetCurrent, int phases) {
+    public record ControllerStatus(String mode, String state, boolean charging, float targetCurrent, int phases,
+                                   String timerEnd) {
+    }
+
+    /**
+     * Topic on which the charge mode can be set.
+     */
+    public static String modeCommandTopic(String chargerName, int socket) {
+        return "alfen/set/" + chargerName + "/" + socket + "/" + KEY_MODE;
+    }
+
+    /**
+     * Topic on which the current charge mode is published (retained), and restored from at startup.
+     */
+    public static String modeStateTopic(String chargerName, int socket) {
+        return statusTopic(chargerName, socket) + "/" + KEY_MODE;
+    }
+
+    /**
+     * Topic on which the {@link ControllerStatus} is published.
+     */
+    public static String statusTopic(String chargerName, int socket) {
+        return "alfen/controller/" + chargerName + "/" + socket;
     }
 
     public AlfenModbusWriter(Vertx vertx, AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttHandler, WriterConfig writerConfig) {
@@ -84,6 +142,8 @@ public class AlfenModbusWriter implements AutoCloseable {
         Pattern pattern = Pattern.compile("alfen/set/" + chargerName + "/(\\d+)/(.*)");
 
         mqttHandler.register(pattern, TOPIC_SET, this::handleMessage);
+        String modeStateTopic = modeStateTopic(chargerName, socket);
+        mqttHandler.register(Pattern.compile(Pattern.quote(modeStateTopic)), modeStateTopic, this::handleModeState);
         mqttHandler.register(Pattern.compile(Pattern.quote(writerConfig.gridConsumedTopic())), writerConfig.gridConsumedTopic(), this::handlePowerConsumed);
         mqttHandler.register(Pattern.compile(Pattern.quote(writerConfig.gridProducedTopic())), writerConfig.gridProducedTopic(), this::handlePowerProduced);
         if (writerConfig.enabled()) {
@@ -122,6 +182,7 @@ public class AlfenModbusWriter implements AutoCloseable {
                 LOG.warn("Unknown charge mode for {}: {}", topic, payload);
                 return;
             }
+            modeCommandReceived = true;
             ChargeMode oldMode = chargeMode;
             chargeMode = newMode;
             if (oldMode != newMode) {
@@ -129,8 +190,31 @@ public class AlfenModbusWriter implements AutoCloseable {
             } else {
                 LOG.info("Charge mode for {} ({}) unchanged: {}", chargerName, socket, newMode);
             }
+            publishMode(newMode);
         } else {
             LOG.warn("Invalid key: {}", topic);
+        }
+    }
+
+    /**
+     * Restore the charge mode from the retained mode state at startup. Ignored once a mode command
+     * was received, so our own (echoed) retained publishes never override a newer command.
+     */
+    private void handleModeState(String topic, Matcher m, String payload) {
+        if (modeCommandReceived) {
+            return;
+        }
+        ChargeMode restored;
+        try {
+            restored = ChargeMode.valueOf(payload.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            LOG.warn("Unknown retained charge mode on {}: {}", topic, payload);
+            return;
+        }
+        ChargeMode oldMode = chargeMode;
+        chargeMode = restored;
+        if (oldMode != restored) {
+            LOG.info("Charge mode for {} ({}) restored: {} -> {}", chargerName, socket, oldMode, restored);
         }
     }
 
@@ -166,7 +250,7 @@ public class AlfenModbusWriter implements AutoCloseable {
         LOG.debug("update {} ({}) mode={}", chargerName, socket, mode);
 
         if (mode == ChargeMode.OFF) {
-            stop(now, false);
+            stop(now, false, ControllerState.OFF);
             return;
         }
 
@@ -179,14 +263,15 @@ public class AlfenModbusWriter implements AutoCloseable {
 
         // Safety: don't act on stale grid readings.
         if (Duration.between(lastUpdate, now).compareTo(config.inputTimeout()) > 0) {
-            LOG.warn("Grid reading for {} ({}) is stale (last update {}), disabling", chargerName, socket, lastUpdate);
-            stop(now, false);
+            LOG.debug("Grid reading for {} ({}) is stale (last update {})", chargerName, socket, lastUpdate);
+            stop(now, false, ControllerState.STALE_INPUT);
             return;
         }
 
         Optional<Integer> chargerDrawOpt = client.getSocketRealPowerSum(socket);
         if (chargerDrawOpt.isEmpty()) {
-            LOG.warn("No socket power measurement for socket {}", socket);
+            LOG.debug("No socket power measurement for socket {}", socket);
+            publishStatus(mode, ControllerState.NO_MEASUREMENT, null, charging, charging ? targetCurrent : 0, currentPhases);
             return;
         }
         int chargerDraw = chargerDrawOpt.get();
@@ -215,21 +300,26 @@ public class AlfenModbusWriter implements AutoCloseable {
 
         if (!wantStart) {
             startConditionSince = null;
-            disable();
+            disable(mode, ControllerState.WAITING_FOR_SURPLUS, null);
             return;
         }
 
         if (startConditionSince == null) {
             startConditionSince = now;
         }
-        boolean sustained = Duration.between(startConditionSince, now).compareTo(config.startDelay()) >= 0;
-        if (sustained && !inCooldown(now)) {
+        // The start delay only rides out short solar peaks in PV_ONLY; in the other modes the start
+        // condition always holds, so they start right away (the cooldown still applies).
+        Instant startAt = mode == ChargeMode.PV_ONLY ? startConditionSince.plus(config.startDelay()) : now;
+        Instant cooldownEnd = lastStop.plus(config.cooldown());
+        if (!now.isBefore(startAt) && !inCooldown(now)) {
             LOG.info("Start conditions satisfied for {} ({}), starting to charge", chargerName, socket);
             charging = true;
             startConditionSince = null;
             applyCharge(now, mode, powerAvailable);
+        } else if (cooldownEnd.isAfter(startAt)) {
+            disable(mode, ControllerState.COOLDOWN, cooldownEnd);
         } else {
-            disable();
+            disable(mode, ControllerState.START_DELAY, startAt);
         }
     }
 
@@ -246,7 +336,7 @@ public class AlfenModbusWriter implements AutoCloseable {
             }
             if (Duration.between(stopConditionSince, now).compareTo(config.stopDelay()) >= 0) {
                 LOG.info("Stop conditions satisfied for {} ({}), stopping", chargerName, socket);
-                stop(now, true);
+                stop(now, true, ControllerState.COOLDOWN);
                 return;
             }
         } else {
@@ -283,7 +373,7 @@ public class AlfenModbusWriter implements AutoCloseable {
         }
         if (chargeBudget(mode, powerAvailable) / VOLTAGE <= config.minCurrent()) {
             LOG.warn("Grid import {} W over limit {} W for {} at minimum current, stopping {} ({})", gridImport, config.maxGridPower(), config.overLimitDelay(), chargerName, socket);
-            stop(now, true);
+            stop(now, true, ControllerState.COOLDOWN);
             return true;
         }
         return false;
@@ -305,8 +395,19 @@ public class AlfenModbusWriter implements AutoCloseable {
 
         int phases = resolvePhases(now, chargeBudget);
         float amps = clampCurrent(chargeBudget / (VOLTAGE * phases));
+        targetCurrent = amps;
         client.setState(socket, amps, phases);
-        publishStatus(mode, true, amps, phases);
+
+        // Report the pending action with the timer that expires first in the order it is acted upon.
+        if (stopConditionSince != null) {
+            publishStatus(mode, ControllerState.STOP_DELAY, stopConditionSince.plus(config.stopDelay()), true, amps, phases);
+        } else if (overLimitSince != null) {
+            publishStatus(mode, ControllerState.OVER_LIMIT, overLimitSince.plus(config.overLimitDelay()), true, amps, phases);
+        } else if (phaseChangeSince != null) {
+            publishStatus(mode, ControllerState.PHASE_SWITCH_DELAY, phaseChangeSince.plus(config.phaseSwitchDelay()), true, amps, phases);
+        } else {
+            publishStatus(mode, ControllerState.CHARGING, null, true, amps, phases);
+        }
     }
 
     /**
@@ -355,9 +456,9 @@ public class AlfenModbusWriter implements AutoCloseable {
     /**
      * Disable charging without changing the state machine (used while waiting to start).
      */
-    private void disable() {
+    private void disable(ChargeMode mode, ControllerState state, Instant timerEnd) {
         client.disable(socket);
-        publishStatus(chargeMode, false, 0, currentPhases);
+        publishStatus(mode, state, timerEnd, false, 0, currentPhases);
     }
 
     /**
@@ -365,27 +466,65 @@ public class AlfenModbusWriter implements AutoCloseable {
      * is started during which charging may not resume.
      * Needed to call this the whole time, as it needs to continue writing to the alfen register.
      */
-    private void stop(Instant now, boolean cooldown) {
+    private void stop(Instant now, boolean cooldown, ControllerState state) {
         charging = false;
         startConditionSince = null;
         stopConditionSince = null;
         phaseChangeSince = null;
         overLimitSince = null;
+        targetCurrent = 0;
+        Instant timerEnd = null;
         if (cooldown) {
             lastStop = now;
+            timerEnd = now.plus(config.cooldown());
         }
         client.disable(socket);
-        publishStatus(chargeMode, false, 0, currentPhases);
+        publishStatus(chargeMode, state, timerEnd, false, 0, currentPhases);
     }
 
-    private void publishStatus(ChargeMode mode, boolean charging, float targetCurrent, int phases) {
+    /**
+     * Log the controller state once when it (or its timer) changes, so the log shows why the
+     * charger is or isn't charging without repeating every interval.
+     */
+    private void logStateChange(ChargeMode mode, ControllerState state, Instant timerEnd) {
+        if (state == lastState && Objects.equals(timerEnd, lastTimerEnd)) {
+            return;
+        }
+        boolean stateChanged = state != lastState;
+        lastState = state;
+        lastTimerEnd = timerEnd;
+        if (!stateChanged) {
+            // Same state with a restarted timer (e.g. start delay restarted): only worth a debug line.
+            LOG.debug("Controller {} ({}) {} timer now ends at {}", chargerName, socket, state, timerEnd);
+            return;
+        }
+        String timer = timerEnd == null ? ""
+                : " until " + timerEnd + " (" + Duration.between(clock.get(), timerEnd).toSeconds() + "s)";
+        if (state == ControllerState.STALE_INPUT || state == ControllerState.NO_MEASUREMENT) {
+            LOG.warn("Controller {} ({}) mode {}: state {}{}", chargerName, socket, mode, state, timer);
+        } else {
+            LOG.info("Controller {} ({}) mode {}: state {}{}", chargerName, socket, mode, state, timer);
+        }
+    }
+
+    private void publishMode(ChargeMode mode) {
+        try {
+            mqttHandler.publish(modeStateTopic(chargerName, socket), mode.name(), true);
+        } catch (Exception e) {
+            LOG.warn("Could not publish charge mode", e);
+        }
+    }
+
+    private void publishStatus(ChargeMode mode, ControllerState state, Instant timerEnd, boolean charging, float targetCurrent, int phases) {
+        logStateChange(mode, state, timerEnd);
         if (mqttHandler == null) {
             return;
         }
         try {
             mqttHandler.publishJson(
-                    "alfen/controller/" + chargerName + "/" + socket,
-                    new ControllerStatus(mode.name(), charging, targetCurrent, phases)
+                    statusTopic(chargerName, socket),
+                    new ControllerStatus(mode.name(), state.name(), charging, targetCurrent, phases,
+                            timerEnd == null ? null : timerEnd.toString())
             );
         } catch (Exception e) {
             LOG.debug("Could not publish controller status", e);

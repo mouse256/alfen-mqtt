@@ -22,6 +22,8 @@ import org.mockito.Mockito;
 import org.muizenhol.alfen.mqtt.MqttTestResource;
 import org.muizenhol.alfen.mqtt.TestMqttServer;
 import org.muizenhol.homeassistant.discovery.Discovery;
+import org.muizenhol.homeassistant.discovery.Platform;
+import org.muizenhol.homeassistant.discovery.component.Select;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,6 +31,7 @@ import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -113,7 +116,15 @@ public class AlfenModbusClientTest {
 
         Discovery capturedArgument = argumentCaptor.getValue();
         assertThat(capturedArgument.stateTopic(), equalTo("alfen/modbus/state/test1/1/socket_measurement"));
-        assertThat(capturedArgument.components().size(), equalTo(9));
+        // 9 socket measurements + 6 controller entities
+        assertThat(capturedArgument.components().size(), equalTo(15));
+        Select mode = (Select) capturedArgument.components().values().stream()
+                .filter(c -> c instanceof Select)
+                .findFirst().orElseThrow();
+        assertThat(mode.getOptions(), equalTo(List.of("OFF", "PV_ONLY", "PV_AND_MIN", "FAST")));
+        assertThat(mode.getPlatform(), equalTo(Platform.SELECT));
+        assertThat(capturedArgument.components().values().stream()
+                .filter(c -> c.getUniqueId().contains("_controller_")).count(), equalTo(6L));
     }
 
     @Test

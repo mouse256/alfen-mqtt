@@ -10,7 +10,10 @@ import com.digitalpetri.modbus.tcp.client.NettyTcpClientTransport;
 import io.quarkus.runtime.Quarkus;
 import io.vertx.core.Vertx;
 import org.muizenhol.homeassistant.discovery.Discovery;
+import org.muizenhol.homeassistant.discovery.DeviceClass;
+import org.muizenhol.homeassistant.discovery.component.BinarySensor;
 import org.muizenhol.homeassistant.discovery.component.Component;
+import org.muizenhol.homeassistant.discovery.component.Select;
 import org.muizenhol.homeassistant.discovery.component.Sensor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,7 +23,9 @@ import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -396,8 +401,9 @@ public class AlfenModbusClient implements AutoCloseable {
                             .withSuggestedDisplayPrecision(i.discoveryInfo().precision())
                             .withValueTemplate("{{ value_json.S" + i.start() + " }}")
                             .build()
-                    ).collect(Collectors.toMap(Component::getUniqueId, i -> i));
+                    ).collect(Collectors.toMap(Component::getUniqueId, i -> i, (a, b) -> a, HashMap::new));
             String uuid = serial + "-" + s;
+            controllerComponents(uuid, s).forEach(c -> components.put(c.getUniqueId(), c));
             Discovery discovery = new Discovery(
                     new Discovery.Device(
                             uuid,
@@ -414,6 +420,61 @@ public class AlfenModbusClient implements AutoCloseable {
             );
             mqttPublisher.sendDiscovery(discovery);
         }
+    }
+
+    /**
+     * Discovery for the charging controller of a socket: the charge mode select and its status.
+     * These have their own state topics, overriding the device-level one.
+     */
+    private List<Component> controllerComponents(String uuid, int socket) {
+        String statusTopic = AlfenModbusWriter.statusTopic(name, socket);
+        return List.of(
+                new Select.Builder()
+                        .withName("Charge mode")
+                        .withUniqueId(uuid + "_controller_mode")
+                        .withCommandTopic(AlfenModbusWriter.modeCommandTopic(name, socket))
+                        .withStateTopic(AlfenModbusWriter.modeStateTopic(name, socket))
+                        .withOptions(Arrays.stream(AlfenModbusWriter.ChargeMode.values()).map(Enum::name).toList())
+                        .withIcon("mdi:ev-station")
+                        .build(),
+                new BinarySensor.Builder()
+                        .withName("Controller charging")
+                        .withUniqueId(uuid + "_controller_charging")
+                        .withDeviceClass(BinarySensor.DeviceClass.BATTERY_CHARGING)
+                        .withStateTopic(statusTopic)
+                        .withValueTemplate("{{ 'ON' if value_json.charging else 'OFF' }}")
+                        .build(),
+                new Sensor.Builder()
+                        .withName("Controller target current")
+                        .withUniqueId(uuid + "_controller_target_current")
+                        .withDeviceClass(DeviceClass.CURRENT)
+                        .withUnitOfMeasurement("A")
+                        .withSuggestedDisplayPrecision(1)
+                        .withStateTopic(statusTopic)
+                        .withValueTemplate("{{ value_json.targetCurrent }}")
+                        .build(),
+                new Sensor.Builder()
+                        .withName("Controller phases")
+                        .withUniqueId(uuid + "_controller_phases")
+                        .withSuggestedDisplayPrecision(0)
+                        .withStateTopic(statusTopic)
+                        .withValueTemplate("{{ value_json.phases }}")
+                        .build(),
+                new Sensor.Builder()
+                        .withName("Controller state")
+                        .withUniqueId(uuid + "_controller_state")
+                        .withStateTopic(statusTopic)
+                        .withValueTemplate("{{ value_json.state }}")
+                        .build(),
+                new Sensor.Builder()
+                        .withName("Controller timer end")
+                        .withUniqueId(uuid + "_controller_timer_end")
+                        .withDeviceClass(DeviceClass.TIMESTAMP)
+                        .withStateTopic(statusTopic)
+                        // HA turns a rendered "None" into unknown: no timer running
+                        .withValueTemplate("{{ value_json.timerEnd if value_json.timerEnd else None }}")
+                        .build()
+        );
     }
 
     private void pollWrite() {

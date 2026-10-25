@@ -272,7 +272,11 @@ public class MqttHandler {
     }
 
     public void publish(String topic, String payload) {
-        doPublish(topic, Buffer.buffer(payload), false);
+        publish(topic, payload, false);
+    }
+
+    public void publish(String topic, String payload, boolean retain) {
+        doPublish(topic, Buffer.buffer(payload), retain);
     }
 
     private void doPublish(String topic, Buffer payload, boolean retain) {

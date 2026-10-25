@@ -15,6 +15,8 @@ import java.util.regex.Pattern;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.closeTo;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -29,10 +31,12 @@ public class AlfenModbusWriterTest {
     Listener listenerSet;
     Listener listenerPowerConsumed;
     Listener listenerPowerProduced;
+    Listener listenerModeState;
     AlfenModbusWriter writer;
     WriterConfig config;
     private static final String CHARGER_NAME = "dummy";
     private static final int SOCKET = 25;
+    private static final String MODE_STATE_TOPIC = "alfen/controller/" + CHARGER_NAME + "/" + SOCKET + "/mode";
     private Integer chargerPowerConsumed;
     private Instant now;
 
@@ -51,6 +55,7 @@ public class AlfenModbusWriterTest {
         listenerSet = registerMock("alfen/set/+/+/+");
         listenerPowerConsumed = registerMock(config.gridConsumedTopic());
         listenerPowerProduced = registerMock(config.gridProducedTopic());
+        listenerModeState = registerMock(MODE_STATE_TOPIC);
 
         doAnswer(invocation -> Optional.ofNullable(chargerPowerConsumed)).when(client).getSocketRealPowerSum(SOCKET);
     }
@@ -183,6 +188,40 @@ public class AlfenModbusWriterTest {
         verify(client, never()).setState(eq(SOCKET), anyFloat(), anyInt());
     }
 
+    private void retainedMode(String mode) {
+        Matcher m = listenerModeState.p.matcher(MODE_STATE_TOPIC);
+        if (!m.matches()) {
+            throw new IllegalStateException("no match for " + MODE_STATE_TOPIC);
+        }
+        listenerModeState.l.handleMessage(MODE_STATE_TOPIC, m, mode);
+    }
+
+    @Test
+    public void testModeCommandPublishedRetained() {
+        setMode("pv_only");
+        verify(mqttHandler).publish(MODE_STATE_TOPIC, "PV_ONLY", true);
+    }
+
+    @Test
+    public void testModeRestoredFromRetained() {
+        retainedMode("FAST");
+        grid(0);
+        tick();
+        advance(Duration.ofMinutes(10));
+        grid(0);
+        tick();
+        verify(client).setState(eq(SOCKET), anyFloat(), anyInt());
+    }
+
+    @Test
+    public void testRetainedModeIgnoredAfterCommand() {
+        setMode("OFF");
+        retainedMode("FAST");
+        grid(0);
+        tick();
+        verifyDisabled();
+    }
+
     @Test
     public void testOff() {
         setMode("OFF");
@@ -193,8 +232,8 @@ public class AlfenModbusWriterTest {
 
     @Test
     public void testStartDebounce() {
-        setMode("PV_AND_MIN");
-        grid(0);
+        setMode("PV_ONLY");
+        grid(2000);
 
         // condition just became satisfied -> not started yet
         tick();
@@ -202,12 +241,49 @@ public class AlfenModbusWriterTest {
 
         // still within start delay
         advance(Duration.ofMinutes(1));
-        grid(0);
+        grid(2000);
         tick();
         verifyDisabled();
 
-        // start delay elapsed -> charging at minimum current, single phase
+        // start delay elapsed -> charging on the surplus, single phase
         advance(Duration.ofMinutes(1).plusSeconds(1));
+        grid(2000);
+        tick();
+        verifySetState(2000 / 230.0, 1);
+    }
+
+    @Test
+    public void testNoStartDelayForPvAndMinAndFast() {
+        for (String mode : new String[]{"PV_AND_MIN", "FAST"}) {
+            beforeEach();
+            setMode(mode);
+            grid(0);
+            tick();
+            verify(client).setState(eq(SOCKET), anyFloat(), eq(1));
+            // FAST has enough budget for 3 phase, so it is charging while waiting to switch phases
+            assertThat(lastStatus().state(), equalTo(mode.equals("FAST") ? "PHASE_SWITCH_DELAY" : "CHARGING"));
+            assertThat(lastStatus().charging(), equalTo(true));
+        }
+    }
+
+    @Test
+    public void testCooldownAppliesWithoutStartDelay() {
+        startCharging("PV_ONLY", 2000);
+        grid(-1500);
+        tick();
+        advance(config.stopDelay().plusSeconds(1));
+        grid(-1500);
+        tick();
+        assertThat(lastStatus().state(), equalTo("COOLDOWN"));
+
+        // switching to PV_AND_MIN during the cooldown doesn't start yet
+        setMode("PV_AND_MIN");
+        grid(0);
+        tick();
+        verifyDisabled();
+        assertThat(lastStatus().state(), equalTo("COOLDOWN"));
+
+        advance(config.cooldown());
         grid(0);
         tick();
         verifySetState(6, 1);
@@ -419,6 +495,65 @@ public class AlfenModbusWriterTest {
         tick();
         verify(client).setState(eq(SOCKET), anyFloat(), eq(3));
         clearInvocations(client);
+    }
+
+    private AlfenModbusWriter.ControllerStatus lastStatus() {
+        ArgumentCaptor<Object> ac = ArgumentCaptor.forClass(Object.class);
+        verify(mqttHandler, atLeastOnce()).publishJson(eq("alfen/controller/" + CHARGER_NAME + "/" + SOCKET), ac.capture());
+        return (AlfenModbusWriter.ControllerStatus) ac.getValue();
+    }
+
+    @Test
+    public void testStatusStartDelayThenCharging() {
+        setMode("PV_ONLY");
+        grid(2000);
+        tick();
+        AlfenModbusWriter.ControllerStatus status = lastStatus();
+        assertThat(status.state(), equalTo("START_DELAY"));
+        assertThat(status.charging(), equalTo(false));
+        assertThat(status.timerEnd(), equalTo(now.plus(config.startDelay()).toString()));
+
+        advance(config.startDelay().plusSeconds(1));
+        grid(2000);
+        tick();
+        status = lastStatus();
+        assertThat(status.state(), equalTo("CHARGING"));
+        assertThat(status.charging(), equalTo(true));
+        assertThat(status.timerEnd(), nullValue());
+    }
+
+    @Test
+    public void testStatusWaitingForSurplusAndOff() {
+        setMode("PV_ONLY");
+        grid(0);
+        tick();
+        assertThat(lastStatus().state(), equalTo("WAITING_FOR_SURPLUS"));
+
+        setMode("OFF");
+        tick();
+        assertThat(lastStatus().state(), equalTo("OFF"));
+    }
+
+    @Test
+    public void testStatusStaleInput() {
+        setMode("FAST");
+        tick();
+        assertThat(lastStatus().state(), equalTo("STALE_INPUT"));
+    }
+
+    @Test
+    public void testStatusCooldownAfterStop() {
+        startCharging("PV_ONLY", 2000);
+        // no more solar: stop after the stop delay, then cooldown is reported with its end time
+        grid(-1500);
+        tick();
+        assertThat(lastStatus().state(), equalTo("STOP_DELAY"));
+        advance(config.stopDelay().plusSeconds(1));
+        grid(-1500);
+        tick();
+        AlfenModbusWriter.ControllerStatus status = lastStatus();
+        assertThat(status.state(), equalTo("COOLDOWN"));
+        assertThat(status.timerEnd(), equalTo(now.plus(config.cooldown()).toString()));
     }
 
     @Test

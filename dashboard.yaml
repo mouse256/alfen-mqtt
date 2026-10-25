@@ -1,0 +1,80 @@
+views:
+  - title: Home
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            icon: mdi:ev-station
+            heading_style: title
+            heading: Alfen
+          - type: entities
+            entities:
+              - entity: sensor.evcc_chargepower
+                name: Power
+                secondary_info: last-updated
+              - entity: select.evcc_mode
+                name: Mode
+              - entity: sensor.evcc_connected
+                name: Connected
+              - entity: sensor.evcc_charging
+                name: Charging
+              - entity: number.skoda_enyaq_charge_limit
+                name:
+                  type: entity
+              - entity: sensor.evcc_pv_remaining
+                name:
+                  type: entity
+              - entity: sensor.evcc_charge_remaining
+                name:
+                  type: entity
+              - entity: sensor.evcc_pv_remaining_2
+                name:
+                  type: entity
+      - type: grid
+        cards:
+          - type: heading
+            icon: mdi:car
+            heading: Car
+            heading_style: title
+          - type: entities
+            entities:
+              - entity: sensor.skoda_enyaq_battery_percentage
+                secondary_info: last-updated
+                name:
+                  type: entity
+              - entity: sensor.skoda_enyaq_charging_power
+                name:
+                  type: entity
+              - entity: binary_sensor.skoda_enyaq_charger_connected
+                name:
+                  type: entity
+              - entity: sensor.skoda_enyaq_ac_time_to_reach_target_temperature
+                name:
+                  type: entity
+              - entity: binary_sensor.skoda_enyaq_doors_locked
+                name:
+                  type: entity
+              - entity: sensor.skoda_enyaq_range
+                name:
+                  type: entity
+              - entity: sensor.skoda_enyaq_remaining_charging_time
+                name:
+                  type: entity
+      - type: grid
+        cards:
+          - type: entities
+            entities:
+              - entity: climate.skoda_enyaq_air_conditioning
+                secondary_info: last-updated
+                name:
+                  type: entity
+              - entity: switch.skoda_enyaq_left_seat_heating_with_ac
+                name:
+                  type: entity
+              - entity: switch.skoda_enyaq_right_seat_heating_with_ac
+                name:
+                  type: entity
+              - entity: switch.skoda_enyaq_window_heating
+                name:
+                  type: entity
+
