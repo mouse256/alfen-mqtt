@@ -87,7 +87,8 @@ public class AlfenModbusWriter implements AutoCloseable {
         mqttHandler.register(Pattern.compile(Pattern.quote(writerConfig.gridConsumedTopic())), writerConfig.gridConsumedTopic(), this::handlePowerConsumed);
         mqttHandler.register(Pattern.compile(Pattern.quote(writerConfig.gridProducedTopic())), writerConfig.gridProducedTopic(), this::handlePowerProduced);
         if (writerConfig.enabled()) {
-            LOG.info("Controller for {} ({}) enabled, charge mode: {}", chargerName, socket, chargeMode);
+            LOG.info("Controller for {} ({}) enabled{}, charge mode: {}", chargerName, socket,
+                    writerConfig.dryRun() ? " (DRY RUN, no modbus writes)" : "", chargeMode);
             timerId = vertx.setPeriodic(writerConfig.interval().toMillis(), this::update);
         } else {
             LOG.info("Controller for {} ({}) disabled", chargerName, socket);

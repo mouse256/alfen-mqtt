@@ -38,7 +38,6 @@ public class AlfenModbusClient implements AutoCloseable {
     private final Vertx vertx;
     private final String name;
     private final MqttPublisher mqttPublisher;
-    private final boolean writeEnabled;
     private final WriterConfig writerConfig;
     private final MqttHandler mqttListener;
     private final Map<Integer, AlfenModbusWriter> writers = new HashMap<>();
@@ -78,13 +77,12 @@ public class AlfenModbusClient implements AutoCloseable {
     private record SetState(boolean enabled, float maxCurrent, int numPhases) {
     }
 
-    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
+    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
         this.vertx = vertx;
         this.client = client;
         this.name = name;
         this.mqttPublisher = mqttPublisher;
         this.mqttListener = mqttListener;
-        this.writeEnabled = writeEnabled;
         this.writerConfig = writerConfig;
         this.modbusExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "modbus-" + name);
@@ -93,8 +91,8 @@ public class AlfenModbusClient implements AutoCloseable {
         });
     }
 
-    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
-        this(vertx, deviceConfig.name(), createClient(deviceConfig), writeEnabled, mqttPublisher, mqttListener, writerConfig);
+    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
+        this(vertx, deviceConfig.name(), createClient(deviceConfig), mqttPublisher, mqttListener, writerConfig);
         start(true);
     }
 
@@ -340,7 +338,7 @@ public class AlfenModbusClient implements AutoCloseable {
     }
 
     private void writeData(Consumer<ByteBuffer> setter, ModbusTcpClient client, ModbusConst.Item item, int unitId) {
-        if (!writeEnabled) {
+        if (writerConfig.dryRun()) {
             return;
         }
         try {
@@ -453,7 +451,7 @@ public class AlfenModbusClient implements AutoCloseable {
      * status of the last poll (at most ~1s old) instead of re-reading everything before each write.
      */
     private synchronized void writeData() {
-        if (!writeEnabled) {
+        if (writerConfig.dryRun()) {
             return;
         }
         setStates.forEach((socket, state) -> {

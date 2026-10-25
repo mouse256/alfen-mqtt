@@ -75,7 +75,7 @@ public class AlfenModbusClientTest {
         socketMaxCurrent = 0;
         mockClient = Mockito.mock(ModbusTcpClient.class);
         mqttHandler.start();
-        alfenModbusClient = new AlfenModbusClient(vertx, DEVICE_NAME, mockClient, true, mqttPublisher, mqttHandler, writerConfig);
+        alfenModbusClient = new AlfenModbusClient(vertx, DEVICE_NAME, mockClient, mqttPublisher, mqttHandler, writerConfig);
     }
 
     @AfterEach

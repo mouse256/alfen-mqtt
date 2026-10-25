@@ -15,6 +15,13 @@ public interface WriterConfig {
     boolean enabled();
 
     /**
+     * Dry run: the controller runs, logs its decisions and publishes its status, but nothing is
+     * written to the charger over modbus.
+     */
+    @WithDefault("false")
+    boolean dryRun();
+
+    /**
      * How often the control loop runs.
      */
     @WithDefault("PT5s")

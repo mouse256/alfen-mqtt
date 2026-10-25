@@ -61,6 +61,10 @@ public class AlfenModbusWriterTest {
                 return false;
             }
 
+            public boolean dryRun() {
+                return false;
+            }
+
             public Duration interval() {
                 return Duration.ofMillis(100);
             }

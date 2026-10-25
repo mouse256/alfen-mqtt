@@ -4,7 +4,6 @@ import com.digitalpetri.modbus.client.ModbusTcpClient;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,9 +33,6 @@ public class AlfenModbus {
     @Inject
     Vertx vertx;
 
-    @ConfigProperty(name = "modbus.write_enabled", defaultValue = "false")
-    boolean writeEnabled;
-
     final Map<String, AlfenModbusClient> clients = new HashMap<>();
 
     private record SetState(boolean enabled, float maxCurrent) {
@@ -58,7 +54,7 @@ public class AlfenModbus {
                 .collect(Collectors.toList()));
 
         deviceConfigs.forEach(deviceConfig -> clients.put(deviceConfig.name(),
-                new AlfenModbusClient(vertx, deviceConfig, writeEnabled, mqttPublisher, mqttListener, writerConfig)));
+                new AlfenModbusClient(vertx, deviceConfig, mqttPublisher, mqttListener, writerConfig)));
 
     }
 
