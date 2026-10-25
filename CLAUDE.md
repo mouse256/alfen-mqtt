@@ -40,6 +40,8 @@ ALFEN_DEVICES_1__ENDPOINT=192.168.1.50   # http mode uses an https:// URL + user
 MQTT_HOST=...  MQTT_PORT=1883
 ```
 
+MQTT topic ownership: only this app publishes state under `alfen/...`. Other tools may only publish *commands* there (`alfen/set/...`); state from other tools (grid power, car battery level) is read from their own topic trees, configured via `writer.grid-*-topic` / `soc.car-soc-topic`.
+
 Notable flags: `writer.enabled` (starts the charging controller, the only thing that writes to the charger; default false), `writer.dry-run` (controller runs and publishes its status but no modbus writes are done; default false), `mqtt.enabled`, `auto.startup` (when false, `Main` skips wiring everything — used by tests), `discovery.uuid` (HA discovery device id).
 
 ## Architecture
@@ -50,6 +52,8 @@ Notable flags: `writer.enabled` (starts the charging controller, the only thing 
 - **`MqttPublisher`** — outbound side: formats device readings into topics/payloads and pushes them through `MqttHandler`.
 - **HTTP mode** — `AlfenController` (`@ApplicationScoped`) sets a Vert.x periodic timer (every 5s) that polls each HTTP device for a fixed set of categories (`meter1`, `temp`, `generic2`). Each device has an `AlfenConnection` that logs in over the Alfen HTTP API (TLS, **trusts all certs**), fetches paged `prop?cat=` responses, and `AlfenController` resolves raw property ids to names via `/ids.properties` and type-converts values into `PropertyParsed`. `AlfenResource` exposes the same data over REST at `/alfen/{device}/categories` and `/alfen/{device}/properties/{category}`.
 - **Modbus mode** — `AlfenModbus` creates one `AlfenModbusClient` per modbus device. `AlfenModbusClient` (the largest/most complex class) holds the digitalpetri Modbus TCP connection, polls holding registers, maintains per-socket `socketStatus`/`socketMeasurement`/`setStates`, publishes readings + HA discovery, and drives `AlfenModbusWriter` to write desired charge state (enable, max current, phase count) back to registers in response to MQTT control messages. `ModbusConst` holds register addresses/layouts. All modbus I/O of a client (the 1s poll and the writes) runs on its own single `modbus-<name>` thread, never on the vert.x event loop: `setState`/`disable` only record the desired state and queue a write, which uses the socket status of the last poll, and the getters used by the controller read concurrent maps without locking.
+
+Vehicle connected: after each poll of the socket status group, `AlfenModbusClient` derives from the IEC 61851 Mode 3 state (register 1201) whether a car is connected (B*/C*/D* = yes, A/E/F = no, anything else unknown and not published) and publishes `ON`/`OFF` on `alfen/modbus/state/<charger>/<socket>/connected` every poll; discovered in HA as binary sensor "Car connected" (device class `plug`). `isVehicleConnected(socket)` exposes it in code.
 
 Register maps, property id mappings, and HA discovery component definitions are the domain-specific heart of the app; the rest is plumbing.
 
@@ -68,6 +72,10 @@ The charge mode is kept in memory but published **retained** on `alfen/controlle
 Home Assistant discovery (`AlfenModbusClient.sendDiscovery`) adds per socket, next to the measurement sensors: a `select` "Charge mode" (command `alfen/set/...`, state from the retained mode topic), a `binary_sensor` "Controller charging" and sensors "Controller target current"/"Controller phases"/"Controller state"/"Controller timer end" (timestamp) from the status JSON. These use their own `state_topic`, overriding the device-level one. `Select` and `BinarySensor` live in the sibling `homeassistant-discovery` library. Topic names come from the static helpers `AlfenModbusWriter.modeCommandTopic`/`modeStateTopic`/`statusTopic`.
 
 All time-based decisions use an injectable `Supplier<Instant>` clock so `AlfenModbusWriterTest` can drive them with simulated time.
+
+### Car battery estimation
+
+The charger doesn't know the car's battery level (AC / IEC 61851 has no SoC; there is no such register in `configuration_guide_modbus_ace_v1.pdf`), so `SocEstimator` (one per socket, created by `AlfenModbusClient` next to the writer) estimates it evcc-style. It is enabled only when `soc.battery-capacity` (kWh, `SocConfig`, prefix `soc`) is set. The car's reported level arrives over MQTT on `soc.car-soc-topic` (default `skoda/enyaq/battery_percentage`, plain percentage, published by e.g. a Home Assistant automation from the car integration; no car APIs in this app). All sockets' estimators listen to that same topic (one car). The estimate is `carSoc + deliveredSinceKWh × soc.efficiency (default 0.9) / capacity × 100`, capped at 100, where the delivered energy comes from register 374 "Real Energy Delivered Sum"; each new reported level resets the anchor. Every `soc.interval` it publishes `SocStatus` (estimate, carSoc, carSocReceived, energySinceWh) on `alfen/car/<charger>/<socket>/soc_estimate`, discovered in HA as the battery sensor "Estimated battery". The anchor is not persisted: after a restart it restarts from the (retained) car level and the current meter value.
 
 ## Testing
 

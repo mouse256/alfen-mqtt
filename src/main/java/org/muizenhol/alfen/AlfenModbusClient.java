@@ -11,6 +11,7 @@ import io.quarkus.runtime.Quarkus;
 import io.vertx.core.Vertx;
 import org.muizenhol.homeassistant.discovery.Discovery;
 import org.muizenhol.homeassistant.discovery.DeviceClass;
+import org.muizenhol.homeassistant.discovery.StateClass;
 import org.muizenhol.homeassistant.discovery.component.BinarySensor;
 import org.muizenhol.homeassistant.discovery.component.Component;
 import org.muizenhol.homeassistant.discovery.component.Select;
@@ -44,8 +45,10 @@ public class AlfenModbusClient implements AutoCloseable {
     private final String name;
     private final MqttPublisher mqttPublisher;
     private final WriterConfig writerConfig;
+    private final SocConfig socConfig;
     private final MqttHandler mqttListener;
     private final Map<Integer, AlfenModbusWriter> writers = new HashMap<>();
+    private final Map<Integer, SocEstimator> socEstimators = new HashMap<>();
     /**
      * All modbus I/O (polling and writing) runs on this single thread, so it never blocks the vert.x
      * event loop and reads/writes are naturally serialized.
@@ -82,13 +85,14 @@ public class AlfenModbusClient implements AutoCloseable {
     private record SetState(boolean enabled, float maxCurrent, int numPhases) {
     }
 
-    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
+    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig, SocConfig socConfig) {
         this.vertx = vertx;
         this.client = client;
         this.name = name;
         this.mqttPublisher = mqttPublisher;
         this.mqttListener = mqttListener;
         this.writerConfig = writerConfig;
+        this.socConfig = socConfig;
         this.modbusExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "modbus-" + name);
             t.setDaemon(true);
@@ -96,8 +100,8 @@ public class AlfenModbusClient implements AutoCloseable {
         });
     }
 
-    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
-        this(vertx, deviceConfig.name(), createClient(deviceConfig), mqttPublisher, mqttListener, writerConfig);
+    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig, SocConfig socConfig) {
+        this(vertx, deviceConfig.name(), createClient(deviceConfig), mqttPublisher, mqttListener, writerConfig, socConfig);
         start(true);
     }
 
@@ -150,6 +154,8 @@ public class AlfenModbusClient implements AutoCloseable {
         }
         writers.values().forEach(AlfenModbusWriter::close);
         writers.clear();
+        socEstimators.values().forEach(SocEstimator::close);
+        socEstimators.clear();
         modbusExecutor.shutdownNow();
     }
 
@@ -238,7 +244,10 @@ public class AlfenModbusClient implements AutoCloseable {
                     readData(ModbusConst.SOCKET_MEASUREMENT, i, true)
                             .ifPresent(s -> socketMeasurement.put(socket, s));
                     readData(ModbusConst.STATUS, i, true)
-                            .ifPresent(s -> socketStatus.put(socket, s));
+                            .ifPresent(s -> {
+                                socketStatus.put(socket, s);
+                                publishVehicleConnected(socket, s);
+                            });
                 }
             } else {
                 LOG.warn("Can't fetch number of sockets. Got null");
@@ -389,6 +398,9 @@ public class AlfenModbusClient implements AutoCloseable {
 
         for (int s = 1; s <= nrOfSockets; s++) {
             writers.put(s, new AlfenModbusWriter(vertx, this, name, s, mqttListener, writerConfig));
+            int socket = s;
+            socConfig.batteryCapacity().ifPresent(capacity ->
+                    socEstimators.put(socket, new SocEstimator(vertx, this, name, socket, mqttListener, socConfig, capacity)));
 
             Map<String, Component> components = ModbusConst.SOCKET_MEASUREMENT.items().stream()
                     .filter(i -> i.discoveryInfo() != null)
@@ -404,6 +416,26 @@ public class AlfenModbusClient implements AutoCloseable {
                     ).collect(Collectors.toMap(Component::getUniqueId, i -> i, (a, b) -> a, HashMap::new));
             String uuid = serial + "-" + s;
             controllerComponents(uuid, s).forEach(c -> components.put(c.getUniqueId(), c));
+            BinarySensor connected = new BinarySensor.Builder()
+                    .withName("Car connected")
+                    .withUniqueId(uuid + "_connected")
+                    .withDeviceClass(BinarySensor.DeviceClass.PLUG)
+                    .withStateTopic(MqttPublisher.connectedTopic(name, s))
+                    .build();
+            components.put(connected.getUniqueId(), connected);
+            if (socConfig.batteryCapacity().isPresent()) {
+                Sensor soc = new Sensor.Builder()
+                        .withName("Estimated battery")
+                        .withUniqueId(uuid + "_soc_estimate")
+                        .withDeviceClass(DeviceClass.BATTERY)
+                        .withStateClass(StateClass.MEASUREMENT)
+                        .withUnitOfMeasurement("%")
+                        .withSuggestedDisplayPrecision(1)
+                        .withStateTopic(SocEstimator.estimateTopic(name, s))
+                        .withValueTemplate("{{ value_json.estimate }}")
+                        .build();
+                components.put(soc.getUniqueId(), soc);
+            }
             Discovery discovery = new Discovery(
                     new Discovery.Device(
                             uuid,
@@ -497,6 +529,46 @@ public class AlfenModbusClient implements AutoCloseable {
         setStates.put(socket, new SetState(true, maxCurrent, numPhases));
 
         runOnModbusThread(this::writeData);
+    }
+
+    /**
+     * Whether a vehicle is connected, derived from the IEC 61851 Mode 3 state (register 1201):
+     * B, C and D (with or without PWM) mean a vehicle is connected; A means none, E and F are
+     * error states. Empty when the state is unknown or not recognised.
+     */
+    static Optional<Boolean> vehicleConnected(Object mode3State) {
+        if (!(mode3State instanceof String state) || state.isEmpty()) {
+            return Optional.empty();
+        }
+        return switch (state.charAt(0)) {
+            case 'B', 'C', 'D' -> Optional.of(true);
+            case 'A', 'E', 'F' -> Optional.of(false);
+            default -> Optional.empty();
+        };
+    }
+
+    public Optional<Boolean> isVehicleConnected(int socket) {
+        Map<Integer, Object> status = socketStatus.get(socket);
+        return status == null ? Optional.empty() : vehicleConnected(status.get(ModbusConst.ID_MODE3_STATE));
+    }
+
+    private void publishVehicleConnected(int socket, Map<Integer, Object> status) {
+        Object mode3State = status.get(ModbusConst.ID_MODE3_STATE);
+        Optional<Boolean> connected = vehicleConnected(mode3State);
+        if (connected.isEmpty()) {
+            LOG.debug("Unknown mode 3 state for {} ({}): {}", name, socket, mode3State);
+            return;
+        }
+        mqttPublisher.sendModbusConnected(name, socket, connected.get());
+    }
+
+    public Optional<Double> getSocketRealEnergyDeliveredSum(int socket) {
+        Map<Integer, Object> measure = socketMeasurement.get(socket);
+        if (measure == null) {
+            return Optional.empty();
+        }
+        Double energy = (Double) measure.get(ModbusConst.ITEM_REAL_ENERGY_DELIVERED_SUM.start());
+        return energy == null || energy.isNaN() ? Optional.empty() : Optional.of(energy);
     }
 
     public Optional<Integer> getSocketRealPowerSum(int socket) {

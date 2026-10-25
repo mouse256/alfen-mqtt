@@ -31,6 +31,9 @@ public class AlfenModbus {
     WriterConfig writerConfig;
 
     @Inject
+    SocConfig socConfig;
+
+    @Inject
     Vertx vertx;
 
     final Map<String, AlfenModbusClient> clients = new HashMap<>();
@@ -54,7 +57,7 @@ public class AlfenModbus {
                 .collect(Collectors.toList()));
 
         deviceConfigs.forEach(deviceConfig -> clients.put(deviceConfig.name(),
-                new AlfenModbusClient(vertx, deviceConfig, mqttPublisher, mqttListener, writerConfig)));
+                new AlfenModbusClient(vertx, deviceConfig, mqttPublisher, mqttListener, writerConfig, socConfig)));
 
     }
 

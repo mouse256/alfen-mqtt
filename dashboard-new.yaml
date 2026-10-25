@@ -43,6 +43,8 @@ views:
                 secondary_info: last-updated
               - entity: select.alfen_mqtt_charge_mode
                 name: Mode
+              - entity: binary_sensor.alfen_mqtt_car_connected
+                name: Connected
               - entity: binary_sensor.alfen_mqtt_controller_charging
                 name: Charging
               - entity: sensor.alfen_mqtt_controller_state

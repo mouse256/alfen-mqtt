@@ -33,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
@@ -59,6 +60,9 @@ public class AlfenModbusClientTest {
     WriterConfig writerConfig;
 
     @Inject
+    SocConfig socConfig;
+
+    @Inject
     Vertx vertx;
 
     @MqttTestResource.Server
@@ -71,14 +75,16 @@ public class AlfenModbusClientTest {
     private static final String DEVICE_NAME = "test1";
     private int numPhases;
     private float socketMaxCurrent;
+    private String mode3State;
 
     @BeforeEach
     void setup() {
         numPhases = 2;
         socketMaxCurrent = 0;
+        mode3State = "A";
         mockClient = Mockito.mock(ModbusTcpClient.class);
         mqttHandler.start();
-        alfenModbusClient = new AlfenModbusClient(vertx, DEVICE_NAME, mockClient, mqttPublisher, mqttHandler, writerConfig);
+        alfenModbusClient = new AlfenModbusClient(vertx, DEVICE_NAME, mockClient, mqttPublisher, mqttHandler, writerConfig, socConfig);
     }
 
     @AfterEach
@@ -116,8 +122,8 @@ public class AlfenModbusClientTest {
 
         Discovery capturedArgument = argumentCaptor.getValue();
         assertThat(capturedArgument.stateTopic(), equalTo("alfen/modbus/state/test1/1/socket_measurement"));
-        // 9 socket measurements + 6 controller entities
-        assertThat(capturedArgument.components().size(), equalTo(15));
+        // 9 socket measurements + 6 controller entities + car connected
+        assertThat(capturedArgument.components().size(), equalTo(16));
         Select mode = (Select) capturedArgument.components().values().stream()
                 .filter(c -> c instanceof Select)
                 .findFirst().orElseThrow();
@@ -125,6 +131,33 @@ public class AlfenModbusClientTest {
         assertThat(mode.getPlatform(), equalTo(Platform.SELECT));
         assertThat(capturedArgument.components().values().stream()
                 .filter(c -> c.getUniqueId().contains("_controller_")).count(), equalTo(6L));
+    }
+
+    @Test
+    void testVehicleConnected() throws Exception {
+        prepare();
+
+        alfenModbusClient.pollRead();
+        verify(mqttPublisher).sendModbusConnected("test1", 1, false);
+        assertThat(alfenModbusClient.isVehicleConnected(1), equalTo(Optional.of(false)));
+
+        mode3State = "C2";
+        alfenModbusClient.pollRead();
+        verify(mqttPublisher).sendModbusConnected("test1", 1, true);
+        assertThat(alfenModbusClient.isVehicleConnected(1), equalTo(Optional.of(true)));
+    }
+
+    @Test
+    void testVehicleConnectedMapping() {
+        for (String s : List.of("B1", "B2", "C1", "C2", "D1", "D2")) {
+            assertThat(s, AlfenModbusClient.vehicleConnected(s), equalTo(Optional.of(true)));
+        }
+        for (String s : List.of("A", "E", "F")) {
+            assertThat(s, AlfenModbusClient.vehicleConnected(s), equalTo(Optional.of(false)));
+        }
+        assertThat(AlfenModbusClient.vehicleConnected(""), equalTo(Optional.empty()));
+        assertThat(AlfenModbusClient.vehicleConnected("x"), equalTo(Optional.empty()));
+        assertThat(AlfenModbusClient.vehicleConnected(null), equalTo(Optional.empty()));
     }
 
     @Test
@@ -290,6 +323,7 @@ public class AlfenModbusClientTest {
             case ModbusConst.ID_REAL_POWER_SUM -> buf.putFloat(testFloatValue); //real power sum
             case ModbusConst.ID_SOCKET_MAX_CURRENT -> buf.putFloat(socketMaxCurrent);
             case ModbusConst.ID_NUM_PHASES -> buf.putShort((short) numPhases);
+            case ModbusConst.ID_MODE3_STATE -> buf.put(mode3State.getBytes(StandardCharsets.UTF_8));
             default -> {
                 switch (i.type()) {
                     case STRING -> buf.put("x".getBytes(StandardCharsets.UTF_8));
