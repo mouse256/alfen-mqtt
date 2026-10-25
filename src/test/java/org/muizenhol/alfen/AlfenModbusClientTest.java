@@ -22,6 +22,8 @@ import org.mockito.Mockito;
 import org.muizenhol.alfen.mqtt.MqttTestResource;
 import org.muizenhol.alfen.mqtt.TestMqttServer;
 import org.muizenhol.homeassistant.discovery.Discovery;
+import org.muizenhol.homeassistant.discovery.Platform;
+import org.muizenhol.homeassistant.discovery.component.Select;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,7 +31,9 @@ import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
@@ -56,6 +60,9 @@ public class AlfenModbusClientTest {
     WriterConfig writerConfig;
 
     @Inject
+    SocConfig socConfig;
+
+    @Inject
     Vertx vertx;
 
     @MqttTestResource.Server
@@ -68,14 +75,16 @@ public class AlfenModbusClientTest {
     private static final String DEVICE_NAME = "test1";
     private int numPhases;
     private float socketMaxCurrent;
+    private String mode3State;
 
     @BeforeEach
     void setup() {
         numPhases = 2;
         socketMaxCurrent = 0;
+        mode3State = "A";
         mockClient = Mockito.mock(ModbusTcpClient.class);
         mqttHandler.start();
-        alfenModbusClient = new AlfenModbusClient(vertx, DEVICE_NAME, mockClient, true, mqttPublisher, mqttHandler, writerConfig);
+        alfenModbusClient = new AlfenModbusClient(vertx, DEVICE_NAME, mockClient, mqttPublisher, mqttHandler, writerConfig, socConfig);
     }
 
     @AfterEach
@@ -113,7 +122,45 @@ public class AlfenModbusClientTest {
 
         Discovery capturedArgument = argumentCaptor.getValue();
         assertThat(capturedArgument.stateTopic(), equalTo("alfen/modbus/state/test1/1/socket_measurement"));
-        assertThat(capturedArgument.components().size(), equalTo(9));
+        // 9 socket measurements + 6 controller entities + car connected (+ estimated battery when configured)
+        boolean socEnabled = socConfig.batteryCapacity().isPresent();
+        assertThat(capturedArgument.components().size(), equalTo(socEnabled ? 17 : 16));
+        assertThat(capturedArgument.components().keySet().stream().anyMatch(k -> k.endsWith("_soc_estimate")),
+                equalTo(socEnabled));
+        Select mode = (Select) capturedArgument.components().values().stream()
+                .filter(c -> c instanceof Select)
+                .findFirst().orElseThrow();
+        assertThat(mode.getOptions(), equalTo(List.of("OFF", "PV_ONLY", "PV_AND_MIN", "FAST")));
+        assertThat(mode.getPlatform(), equalTo(Platform.SELECT));
+        assertThat(capturedArgument.components().values().stream()
+                .filter(c -> c.getUniqueId().contains("_controller_")).count(), equalTo(6L));
+    }
+
+    @Test
+    void testVehicleConnected() throws Exception {
+        prepare();
+
+        alfenModbusClient.pollRead();
+        verify(mqttPublisher).sendModbusConnected("test1", 1, false);
+        assertThat(alfenModbusClient.isVehicleConnected(1), equalTo(Optional.of(false)));
+
+        mode3State = "C2";
+        alfenModbusClient.pollRead();
+        verify(mqttPublisher).sendModbusConnected("test1", 1, true);
+        assertThat(alfenModbusClient.isVehicleConnected(1), equalTo(Optional.of(true)));
+    }
+
+    @Test
+    void testVehicleConnectedMapping() {
+        for (String s : List.of("B1", "B2", "C1", "C2", "D1", "D2")) {
+            assertThat(s, AlfenModbusClient.vehicleConnected(s), equalTo(Optional.of(true)));
+        }
+        for (String s : List.of("A", "E", "F")) {
+            assertThat(s, AlfenModbusClient.vehicleConnected(s), equalTo(Optional.of(false)));
+        }
+        assertThat(AlfenModbusClient.vehicleConnected(""), equalTo(Optional.empty()));
+        assertThat(AlfenModbusClient.vehicleConnected("x"), equalTo(Optional.empty()));
+        assertThat(AlfenModbusClient.vehicleConnected(null), equalTo(Optional.empty()));
     }
 
     @Test
@@ -167,35 +214,81 @@ public class AlfenModbusClientTest {
         client.connect(mqttConfig.port(), mqttConfig.host()).toCompletionStage().toCompletableFuture().join();
 
         LOG.info("publish");
+        //provide a fresh grid reading so the controller doesn't treat the input as stale
+        client.publish(writerConfig.gridProducedTopic(), Buffer.buffer("0"), MqttQoS.AT_LEAST_ONCE, false, false);
+        client.publish(writerConfig.gridConsumedTopic(), Buffer.buffer("0"), MqttQoS.AT_LEAST_ONCE, false, false);
         client.publish("alfen/set/" + DEVICE_NAME + "/1/mode", Buffer.buffer("PV_AND_MIN"), MqttQoS.AT_LEAST_ONCE, false, false);
 
-        //setting mode to PV_ONLY will enable the power to 6A an 1 phase
+        //setting mode to PV_AND_MIN will enable the power to 6A and 1 phase
+        //the writer starts in OFF, so there may be some 0A (disabled) writes before the mode arrives
+        verify(mockClient, timeout(10_000)).writeMultipleRegisters(anyInt(), ArgumentMatchers.argThat(r ->
+                r.address() == ModbusConst.ITEM_NUM_PHASES.start()));
         ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
-        verify(mockClient, timeout(10_000).times(2)).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
-        assertThat(argumentCaptor.getAllValues().size(), equalTo(2));
+        verify(mockClient, atLeast(2)).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
+        java.util.List<WriteMultipleRegistersRequest> writes = argumentCaptor.getAllValues().stream()
+                .dropWhile(r -> r.address() == ModbusConst.ITEM_MAX_CURRENT.start() && ByteBuffer.wrap(r.values()).getFloat() == 0f)
+                .toList();
 
-        WriteMultipleRegistersRequest first = argumentCaptor.getAllValues().getFirst();
-
+        WriteMultipleRegistersRequest first = writes.getFirst();
         assertThat(first.address(), equalTo(ModbusConst.ITEM_MAX_CURRENT.start())); //max current
         assertThat(ByteBuffer.wrap(first.values()).getFloat(), equalTo(6f)); //6 amp
 
-        verifyNumPhases(argumentCaptor.getAllValues().get(1), 1); //1 phase
+        verifyNumPhases(writes.get(1), 1); //1 phase
 
-        // every 1 sec the values will be updated. The num phases did not change.
+        // once a poll has seen the new phase count, only the max current keeps being written
+        alfenModbusClient.pollRead();
+        Thread.sleep(500); //let writes queued before the poll drain
+        clearInvocations(mockClient);
         ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor2 = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
-        verify(mockClient, timeout(10_000).times(3)).writeMultipleRegisters(anyInt(), argumentCaptor2.capture());
-        assertThat(argumentCaptor2.getAllValues().size(), equalTo(3));
-
-        WriteMultipleRegistersRequest third = argumentCaptor2.getAllValues().get(2);
-
-        assertThat(third.address(), equalTo(ModbusConst.ITEM_MAX_CURRENT.start())); //max current
-        assertThat(ByteBuffer.wrap(third.values()).getFloat(), equalTo(6f)); //6 amp
+        verify(mockClient, timeout(10_000).atLeast(3)).writeMultipleRegisters(anyInt(), argumentCaptor2.capture());
+        for (WriteMultipleRegistersRequest req : argumentCaptor2.getAllValues()) {
+            assertThat(req.address(), equalTo(ModbusConst.ITEM_MAX_CURRENT.start())); //max current
+            assertThat(ByteBuffer.wrap(req.values()).getFloat(), equalTo(6f)); //6 amp
+        }
     }
 
     private void verifyNumPhases(WriteMultipleRegistersRequest sec, int expected) {
         assertThat(sec.address(), equalTo(ModbusConst.ITEM_NUM_PHASES.start()));
         assertThat(getShort(ByteBuffer.wrap(sec.values())), equalTo(expected)); //1 phase
         numPhases = expected;
+    }
+
+    @Test
+    void testDisableAfterEnable() throws Exception {
+        prepare();
+        //do 1 read to initialize the socket status
+        alfenModbusClient.pollRead();
+
+        alfenModbusClient.setState(1, 10, 1);
+        alfenModbusClient.disable(1);
+
+        //writes happen asynchronously on the modbus thread; the disable must end up writing 0A
+        verify(mockClient, timeout(5_000).atLeastOnce()).writeMultipleRegisters(anyInt(), ArgumentMatchers.argThat(r ->
+                r.address() == ModbusConst.ITEM_MAX_CURRENT.start() && ByteBuffer.wrap(r.values()).getFloat() == 0f));
+    }
+
+    @Test
+    void testStateReadDoesNotWaitForModbus() throws Exception {
+        prepare();
+        alfenModbusClient.pollRead();
+
+        //a slow charge point: every read takes 3s
+        Mockito.doAnswer(invocationOnMock -> {
+            Thread.sleep(3_000);
+            ReadHoldingRegistersRequest req = invocationOnMock.getArgument(1, ReadHoldingRegistersRequest.class);
+            return new ReadHoldingRegistersResponse(makeRegisters(invocationOnMock.getArgument(0, Integer.class), req));
+        }).when(mockClient).readHoldingRegisters(Mockito.anyInt(), Mockito.any());
+        Thread slowRead = new Thread(alfenModbusClient::pollRead);
+        slowRead.start();
+        Thread.sleep(200); //let the slow read grab the client
+
+        //the controller (event loop) must get the last measurement and queue writes without blocking
+        long start = System.nanoTime();
+        assertThat(alfenModbusClient.getSocketRealPowerSum(1).orElseThrow(), equalTo(Math.round(testFloatValue)));
+        alfenModbusClient.setState(1, 10, 1);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+        assertThat(elapsedMs < 500, equalTo(true));
+        slowRead.join();
     }
 
     private int getShort(ByteBuffer buf) {
@@ -233,6 +326,7 @@ public class AlfenModbusClientTest {
             case ModbusConst.ID_REAL_POWER_SUM -> buf.putFloat(testFloatValue); //real power sum
             case ModbusConst.ID_SOCKET_MAX_CURRENT -> buf.putFloat(socketMaxCurrent);
             case ModbusConst.ID_NUM_PHASES -> buf.putShort((short) numPhases);
+            case ModbusConst.ID_MODE3_STATE -> buf.put(mode3State.getBytes(StandardCharsets.UTF_8));
             default -> {
                 switch (i.type()) {
                     case STRING -> buf.put("x".getBytes(StandardCharsets.UTF_8));

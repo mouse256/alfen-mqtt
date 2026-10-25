@@ -1,0 +1,37 @@
+
+----
+controller support
+
+At this moment, this tool connects to alfen over modbus, and read values and publishes them over MQTT.
+I want to add support to control the power output of the charger, much alike https://github.com/evcc-io/evcc does.
+
+What it should be doing:
+
+inputs: 
+* over mqtt, it should get
+  * wanted behavior (off, only solar charging, charge with a min current, as-fast-as-possible)
+  * Input from the power consumption from the grid (amount of power drawn, or amount of power returned)
+  * Input from solar panels (but not sure this is actually useful, maybe the grid usage is enough?)
+* in a configuration file
+  * What the maximum power is allowed from the grid (to avoid too big spikes)
+  * What the min-current power is
+
+
+contraints:
+* A charger can work in single phase or 3 phase mode
+* The min power is always 6A per phase (so 6A in single phase mode, 18A in 3phase mode)
+* It's bad for the charger car to switch on/off the whole time:
+  * So it should only start charging after a certain period the settings are satified (should be a setting in the config file)
+  * Similar for turning off (if there is no more solar power for a certain period, stop, also configurable in the config file)
+  * However if there is a too big power spike (say 10% over the allowed power budget, it should stop immediately)
+  * After it's turned off, there should be a cooldown period before it can be turned on again (option in the config file again)
+* excess solar power is a bit tricky, as you can only start charging at 6A minimum (which is +- 1400W). So 
+  * it should be configurable at what level of power injected to the grid the charging start (eg 500W)
+  * it should be configurable at what level of power drawn from the grid the charging stops (eg 1000W)
+
+behavior:
+* It should control the charger with respect to the wanted behavior
+* off: not charging
+* solar-only: only charge if there is excess solar power (so it would send it back to the grid otherwise)
+* min-current: charge at the min-current power from the configfile. However, if there is more excess power available, faster charging should be done.
+* as-fast-as-possible: charge as fast as possible. However take into account the max power allowed from the grid. This means it should not charge at a fixed power, but depending on how many appliances in the house are consuming power and/or solar power available should determine this output.

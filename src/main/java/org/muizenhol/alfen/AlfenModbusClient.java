@@ -10,7 +10,11 @@ import com.digitalpetri.modbus.tcp.client.NettyTcpClientTransport;
 import io.quarkus.runtime.Quarkus;
 import io.vertx.core.Vertx;
 import org.muizenhol.homeassistant.discovery.Discovery;
+import org.muizenhol.homeassistant.discovery.DeviceClass;
+import org.muizenhol.homeassistant.discovery.StateClass;
+import org.muizenhol.homeassistant.discovery.component.BinarySensor;
 import org.muizenhol.homeassistant.discovery.component.Component;
+import org.muizenhol.homeassistant.discovery.component.Select;
 import org.muizenhol.homeassistant.discovery.component.Sensor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,9 +24,15 @@ import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -34,10 +44,17 @@ public class AlfenModbusClient implements AutoCloseable {
     private final Vertx vertx;
     private final String name;
     private final MqttPublisher mqttPublisher;
-    private final boolean writeEnabled;
     private final WriterConfig writerConfig;
+    private final SocConfig socConfig;
     private final MqttHandler mqttListener;
     private final Map<Integer, AlfenModbusWriter> writers = new HashMap<>();
+    private final Map<Integer, SocEstimator> socEstimators = new HashMap<>();
+    /**
+     * All modbus I/O (polling and writing) runs on this single thread, so it never blocks the vert.x
+     * event loop and reads/writes are naturally serialized.
+     */
+    private final ExecutorService modbusExecutor;
+    private long pollTimerId = -1;
     private long readCount = 0;
     private int errorCount = 0;
 
@@ -50,36 +67,41 @@ public class AlfenModbusClient implements AutoCloseable {
     private volatile long lastPollSuccessMs = 0;
 
     /**
-     * States to set/write. Indexed per socket.
+     * States to set/write. Indexed per socket. Updated from the event loop, written from the modbus thread.
      */
-    private final Map<Integer, SetState> setStates = new HashMap<>();
+    private final Map<Integer, SetState> setStates = new ConcurrentHashMap<>();
 
     /**
-     * Last state read. Indexed per socket
+     * Last state read. Indexed per socket. Updated from the modbus thread, read from the event loop.
      */
-    private final Map<Integer, Map<Integer, Object>> socketStatus = new HashMap<>();
+    private final Map<Integer, Map<Integer, Object>> socketStatus = new ConcurrentHashMap<>();
 
     /**
-     * Last socket measurement read. Indexed per socket
+     * Last socket measurement read. Indexed per socket. Updated from the modbus thread, read from the event loop.
      */
-    private final Map<Integer, Map<Integer, Object>> socketMeasurement = new HashMap<>();
+    private final Map<Integer, Map<Integer, Object>> socketMeasurement = new ConcurrentHashMap<>();
 
 
     private record SetState(boolean enabled, float maxCurrent, int numPhases) {
     }
 
-    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
+    AlfenModbusClient(Vertx vertx, String name, ModbusTcpClient client, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig, SocConfig socConfig) {
         this.vertx = vertx;
         this.client = client;
         this.name = name;
         this.mqttPublisher = mqttPublisher;
         this.mqttListener = mqttListener;
-        this.writeEnabled = writeEnabled;
         this.writerConfig = writerConfig;
+        this.socConfig = socConfig;
+        this.modbusExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "modbus-" + name);
+            t.setDaemon(true);
+            return t;
+        });
     }
 
-    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, boolean writeEnabled, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig) {
-        this(vertx, deviceConfig.name(), createClient(deviceConfig), writeEnabled, mqttPublisher, mqttListener, writerConfig);
+    public AlfenModbusClient(Vertx vertx, AlfenConfig.Device deviceConfig, MqttPublisher mqttPublisher, MqttHandler mqttListener, WriterConfig writerConfig, SocConfig socConfig) {
+        this(vertx, deviceConfig.name(), createClient(deviceConfig), mqttPublisher, mqttListener, writerConfig, socConfig);
         start(true);
     }
 
@@ -102,7 +124,7 @@ public class AlfenModbusClient implements AutoCloseable {
         }
 
         if (pollEnabled) {
-            vertx.setPeriodic(0, Duration.ofSeconds(1).toMillis(), this::poll);
+            pollTimerId = vertx.setPeriodic(0, Duration.ofSeconds(1).toMillis(), this::poll);
 //            if (writeEnabled) {
 //                LOG.info("Startup: write enabled");
 //                vertx.setPeriodic(0, Duration.ofSeconds(10).toMillis(), this::pollWrite);
@@ -112,8 +134,19 @@ public class AlfenModbusClient implements AutoCloseable {
         }
     }
 
+    private void runOnModbusThread(Runnable task) {
+        try {
+            modbusExecutor.execute(task);
+        } catch (RejectedExecutionException e) {
+            LOG.debug("Modbus client {} is closed, dropping task", name);
+        }
+    }
+
     @Override
     public void close() {
+        if (pollTimerId != -1) {
+            vertx.cancelTimer(pollTimerId);
+        }
         try {
             client.disconnect();
         } catch (ModbusExecutionException e) {
@@ -121,6 +154,9 @@ public class AlfenModbusClient implements AutoCloseable {
         }
         writers.values().forEach(AlfenModbusWriter::close);
         writers.clear();
+        socEstimators.values().forEach(SocEstimator::close);
+        socEstimators.clear();
+        modbusExecutor.shutdownNow();
     }
 
     public String getName() {
@@ -130,7 +166,7 @@ public class AlfenModbusClient implements AutoCloseable {
     private void poll(long l) {
         LOG.debug("Polling...");
         lastPollAttemptMs = System.currentTimeMillis();
-        vertx.executeBlocking(() -> {
+        runOnModbusThread(() -> {
             try {
                 pollRead();
                 readCount++;
@@ -146,7 +182,6 @@ public class AlfenModbusClient implements AutoCloseable {
             } finally {
                 lastPollFinishMs = System.currentTimeMillis();
             }
-            return null;
         });
     }
 
@@ -209,7 +244,10 @@ public class AlfenModbusClient implements AutoCloseable {
                     readData(ModbusConst.SOCKET_MEASUREMENT, i, true)
                             .ifPresent(s -> socketMeasurement.put(socket, s));
                     readData(ModbusConst.STATUS, i, true)
-                            .ifPresent(s -> socketStatus.put(socket, s));
+                            .ifPresent(s -> {
+                                socketStatus.put(socket, s);
+                                publishVehicleConnected(socket, s);
+                            });
                 }
             } else {
                 LOG.warn("Can't fetch number of sockets. Got null");
@@ -314,7 +352,7 @@ public class AlfenModbusClient implements AutoCloseable {
     }
 
     private void writeData(Consumer<ByteBuffer> setter, ModbusTcpClient client, ModbusConst.Item item, int unitId) {
-        if (!writeEnabled) {
+        if (writerConfig.dryRun()) {
             return;
         }
         try {
@@ -360,6 +398,9 @@ public class AlfenModbusClient implements AutoCloseable {
 
         for (int s = 1; s <= nrOfSockets; s++) {
             writers.put(s, new AlfenModbusWriter(vertx, this, name, s, mqttListener, writerConfig));
+            int socket = s;
+            socConfig.batteryCapacity().ifPresent(capacity ->
+                    socEstimators.put(socket, new SocEstimator(vertx, this, name, socket, mqttListener, socConfig, capacity)));
 
             Map<String, Component> components = ModbusConst.SOCKET_MEASUREMENT.items().stream()
                     .filter(i -> i.discoveryInfo() != null)
@@ -372,8 +413,29 @@ public class AlfenModbusClient implements AutoCloseable {
                             .withSuggestedDisplayPrecision(i.discoveryInfo().precision())
                             .withValueTemplate("{{ value_json.S" + i.start() + " }}")
                             .build()
-                    ).collect(Collectors.toMap(Component::getUniqueId, i -> i));
+                    ).collect(Collectors.toMap(Component::getUniqueId, i -> i, (a, b) -> a, HashMap::new));
             String uuid = serial + "-" + s;
+            controllerComponents(uuid, s).forEach(c -> components.put(c.getUniqueId(), c));
+            BinarySensor connected = new BinarySensor.Builder()
+                    .withName("Car connected")
+                    .withUniqueId(uuid + "_connected")
+                    .withDeviceClass(BinarySensor.DeviceClass.PLUG)
+                    .withStateTopic(MqttPublisher.connectedTopic(name, s))
+                    .build();
+            components.put(connected.getUniqueId(), connected);
+            if (socConfig.batteryCapacity().isPresent()) {
+                Sensor soc = new Sensor.Builder()
+                        .withName("Estimated battery")
+                        .withUniqueId(uuid + "_soc_estimate")
+                        .withDeviceClass(DeviceClass.BATTERY)
+                        .withStateClass(StateClass.MEASUREMENT)
+                        .withUnitOfMeasurement("%")
+                        .withSuggestedDisplayPrecision(1)
+                        .withStateTopic(SocEstimator.estimateTopic(name, s))
+                        .withValueTemplate("{{ value_json.estimate }}")
+                        .build();
+                components.put(soc.getUniqueId(), soc);
+            }
             Discovery discovery = new Discovery(
                     new Discovery.Device(
                             uuid,
@@ -392,28 +454,124 @@ public class AlfenModbusClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Discovery for the charging controller of a socket: the charge mode select and its status.
+     * These have their own state topics, overriding the device-level one.
+     */
+    private List<Component> controllerComponents(String uuid, int socket) {
+        String statusTopic = AlfenModbusWriter.statusTopic(name, socket);
+        return List.of(
+                new Select.Builder()
+                        .withName("Charge mode")
+                        .withUniqueId(uuid + "_controller_mode")
+                        .withCommandTopic(AlfenModbusWriter.modeCommandTopic(name, socket))
+                        .withStateTopic(AlfenModbusWriter.modeStateTopic(name, socket))
+                        .withOptions(Arrays.stream(AlfenModbusWriter.ChargeMode.values()).map(Enum::name).toList())
+                        .withIcon("mdi:ev-station")
+                        .build(),
+                new BinarySensor.Builder()
+                        .withName("Controller charging")
+                        .withUniqueId(uuid + "_controller_charging")
+                        .withDeviceClass(BinarySensor.DeviceClass.BATTERY_CHARGING)
+                        .withStateTopic(statusTopic)
+                        .withValueTemplate("{{ 'ON' if value_json.charging else 'OFF' }}")
+                        .build(),
+                new Sensor.Builder()
+                        .withName("Controller target current")
+                        .withUniqueId(uuid + "_controller_target_current")
+                        .withDeviceClass(DeviceClass.CURRENT)
+                        .withUnitOfMeasurement("A")
+                        .withSuggestedDisplayPrecision(1)
+                        .withStateTopic(statusTopic)
+                        .withValueTemplate("{{ value_json.targetCurrent }}")
+                        .build(),
+                new Sensor.Builder()
+                        .withName("Controller phases")
+                        .withUniqueId(uuid + "_controller_phases")
+                        .withSuggestedDisplayPrecision(0)
+                        .withStateTopic(statusTopic)
+                        .withValueTemplate("{{ value_json.phases }}")
+                        .build(),
+                new Sensor.Builder()
+                        .withName("Controller state")
+                        .withUniqueId(uuid + "_controller_state")
+                        .withStateTopic(statusTopic)
+                        .withValueTemplate("{{ value_json.state }}")
+                        .build(),
+                new Sensor.Builder()
+                        .withName("Controller timer end")
+                        .withUniqueId(uuid + "_controller_timer_end")
+                        .withDeviceClass(DeviceClass.TIMESTAMP)
+                        .withStateTopic(statusTopic)
+                        // HA turns a rendered "None" into unknown: no timer running
+                        .withValueTemplate("{{ value_json.timerEnd if value_json.timerEnd else None }}")
+                        .build()
+        );
+    }
+
     private void pollWrite() {
 
     }
 
 
     public void disable(int socket) {
-        if (Optional.ofNullable(setStates.get(socket)).map(SetState::enabled).isEmpty()) {
+        SetState current = setStates.get(socket);
+        if (current == null || current.enabled()) {
             LOG.info("Set socket {} to disabled", socket);
             setStates.put(socket, new SetState(false, 0, 1));
 
         }
-        writeData();
+        runOnModbusThread(this::writeData);
     }
 
     public void setState(int socket, float maxCurrent, int numPhases) {
         LOG.info("Set socket {} to enabled, maxCurrent: {}, numPhases: {}", socket, maxCurrent, numPhases);
         setStates.put(socket, new SetState(true, maxCurrent, numPhases));
 
-        writeData();
+        runOnModbusThread(this::writeData);
     }
 
-    public synchronized Optional<Integer> getSocketRealPowerSum(int socket) {
+    /**
+     * Whether a vehicle is connected, derived from the IEC 61851 Mode 3 state (register 1201):
+     * B, C and D (with or without PWM) mean a vehicle is connected; A means none, E and F are
+     * error states. Empty when the state is unknown or not recognised.
+     */
+    static Optional<Boolean> vehicleConnected(Object mode3State) {
+        if (!(mode3State instanceof String state) || state.isEmpty()) {
+            return Optional.empty();
+        }
+        return switch (state.charAt(0)) {
+            case 'B', 'C', 'D' -> Optional.of(true);
+            case 'A', 'E', 'F' -> Optional.of(false);
+            default -> Optional.empty();
+        };
+    }
+
+    public Optional<Boolean> isVehicleConnected(int socket) {
+        Map<Integer, Object> status = socketStatus.get(socket);
+        return status == null ? Optional.empty() : vehicleConnected(status.get(ModbusConst.ID_MODE3_STATE));
+    }
+
+    private void publishVehicleConnected(int socket, Map<Integer, Object> status) {
+        Object mode3State = status.get(ModbusConst.ID_MODE3_STATE);
+        Optional<Boolean> connected = vehicleConnected(mode3State);
+        if (connected.isEmpty()) {
+            LOG.debug("Unknown mode 3 state for {} ({}): {}", name, socket, mode3State);
+            return;
+        }
+        mqttPublisher.sendModbusConnected(name, socket, connected.get());
+    }
+
+    public Optional<Double> getSocketRealEnergyDeliveredSum(int socket) {
+        Map<Integer, Object> measure = socketMeasurement.get(socket);
+        if (measure == null) {
+            return Optional.empty();
+        }
+        Double energy = (Double) measure.get(ModbusConst.ITEM_REAL_ENERGY_DELIVERED_SUM.start());
+        return energy == null || energy.isNaN() ? Optional.empty() : Optional.of(energy);
+    }
+
+    public Optional<Integer> getSocketRealPowerSum(int socket) {
         Map<Integer, Object> measure = socketMeasurement.get(socket);
         if (measure == null) {
             return Optional.empty();
@@ -421,11 +579,14 @@ public class AlfenModbusClient implements AutoCloseable {
         return Optional.of(Math.round((Float) measure.get(ModbusConst.ITEM_REAL_POWER_SUM.start())));
     }
 
+    /**
+     * Write the desired state of every socket. Runs on the modbus thread and relies on the socket
+     * status of the last poll (at most ~1s old) instead of re-reading everything before each write.
+     */
     private synchronized void writeData() {
-        if (!writeEnabled) {
+        if (writerConfig.dryRun()) {
             return;
         }
-        pollRead(); //update state
         setStates.forEach((socket, state) -> {
             LOG.debug("Writing state for socket {} ({})", socket, state);
             if (state.enabled) {

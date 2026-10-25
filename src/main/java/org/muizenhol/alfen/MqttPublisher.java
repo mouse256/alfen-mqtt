@@ -74,6 +74,21 @@ public class MqttPublisher {
         mqttHandler.publishJson(topic, values2);
     }
 
+    /**
+     * Topic on which whether a vehicle is connected to the socket is published ({@code ON}/{@code OFF}).
+     */
+    public static String connectedTopic(String name, int addr) {
+        return "alfen/modbus/state/" + name + "/" + addr + "/connected";
+    }
+
+    public void sendModbusConnected(String name, int addr, boolean connected) {
+        if (!mqttConfig.enabled()) {
+            LOG.debug("MQTT is disabled");
+            return;
+        }
+        mqttHandler.publish(connectedTopic(name, addr), connected ? "ON" : "OFF");
+    }
+
     public void sendModbusEvcc(String name, int addr, Evcc.Charger charger) {
         if (!mqttConfig.enabled()) {
             LOG.debug("MQTT is disabled");

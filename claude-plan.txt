@@ -1,0 +1,165 @@
+Plan: Charging controller for Alfen (load management)
+======================================================
+
+Source: refined from plan.txt after codebase exploration and clarification.
+
+CONTEXT
+-------
+plan.txt requests evcc-style load management: control the Alfen charger's power output over
+modbus based on (a) MQTT inputs (desired mode + grid power flow) and (b) config (grid budget,
+min current, debounce/cooldown timers, solar thresholds).
+
+A rough first cut ALREADY EXISTS in src/main/java/org/muizenhol/alfen/AlfenModbusWriter.java:
+  - ChargeMode enum OFF / PV_ONLY / PV_AND_MIN / FAST
+    (maps to plan's off / solar-only / min-current / as-fast-as-possible).
+  - MQTT inputs wired: mode via alfen/set/<charger>/<socket>/mode, grid power via
+    slimmelezer/sensor/power_consumed|produced/state, solar via serialread/power.
+  - Periodic update(Long) (every writer.interval, default 5s) computing
+    powerAvailable = (produced - consumed) + chargerDraw, calling client.setState/disable.
+
+MISSING vs plan.txt (the actual work):
+  1. No hysteresis/debounce - charging toggles instantly (bad for car/charger).
+  2. No cooldown after stop; no immediate stop on grid-budget spike.
+  3. No configurable grid budget; FAST hardcoded 6A/3ph instead of using the budget.
+  4. No phase awareness (6A/phase -> 6A@1ph ~1.4kW, 18A@3ph ~4.1kW); PV modes hardcode 1ph.
+  5. Solar-only has no configurable start/stop thresholds.
+  6. Input topics hardcoded to one installation.
+  7. No stale-input safety guard; timers untestable (no injectable clock).
+
+CLARIFIED DECISIONS
+-------------------
+  - Phase handling: auto-switch 1<->3 phase based on sustained available power (own debounce).
+  - Solar input: use NET GRID POWER ONLY - drop the serialread/power solar topic from the logic.
+  - Input topics: make the grid topics CONFIGURABLE in WriterConfig.
+
+APPROACH
+--------
+Rework the per-socket controller in AlfenModbusWriter into a small state machine with
+config-driven timers. Reuse existing MQTT-listener registration
+(mqttHandler.register(Pattern, mqttPattern, listener)), client.getSocketRealPowerSum(socket),
+and client.setState/disable. Keep writer.enabled + modbus.write_enabled as master gates.
+
+Config - WriterConfig.java (prefix "writer"); keep enabled, interval; add:
+  - minCurrent    int A/phase   default 6    (rename of current minPower)
+  - maxCurrent    int A/phase   default 16   (charger cap; clamp target)
+  - maxGridPower  int W         default 7400 (total grid-import budget)
+  - spikePercent  int           default 10   (import above budget*(1+pct/100) => immediate stop)
+  - startDelay    Duration      default PT2M (conditions satisfied this long before starting)
+  - stopDelay     Duration      default PT3M (conditions unmet this long before stopping)
+  - cooldown      Duration      default PT5M (after a stop before charging may resume)
+  - phaseSwitchDelay Duration   default PT5M (debounce for 1<->3 phase changes)
+  - solarStartPower int W       default 500  (export above which solar-only starts)
+  - solarStopPower  int W       default 1000 (import above which solar-only stops)
+  - inputTimeout  Duration      default PT1M (grid reading older than this => unsafe)
+  - gridConsumedTopic / gridProducedTopic String (default to current slimmelezer/... topics;
+    payload still parsed as kW). Solar topic removed.
+
+Control logic - AlfenModbusWriter.java:
+  - Inject Supplier<Instant> clock (default Instant::now) so debounce/cooldown are unit-testable
+    (tests advance simulated time). KEY testability change.
+  - Track per-socket runtime state: charging(bool), lastStop(Instant, cooldown),
+    startConditionSince / stopConditionSince (Instants), currentPhases, phaseChangeSince.
+  - powerAvailable = (produced - consumed) + chargerDraw (export-if-no-charger), as today.
+  - Stale guard: if newest grid reading older than inputTimeout, disable and reset timers.
+  - Spike guard (all modes, every tick): if grid import > maxGridPower*(1+spikePercent/100),
+    disable, set lastStop, enter cooldown immediately.
+  - Cooldown: never (re)start while now - lastStop < cooldown.
+  - Per mode:
+      OFF        -> disable.
+      PV_ONLY    -> start when export >= solarStartPower sustained startDelay; stop when import
+                    >= solarStopPower sustained stopDelay; while charging target amps from
+                    powerAvailable.
+      PV_AND_MIN -> always at least minCurrent; more when excess. (Still subject to spike guard.)
+      FAST       -> maximise within budget: chargerMaxW = maxGridPower + powerAvailable;
+                    amps = clamp(chargerMaxW/(230*phases), minCurrent, maxCurrent); prefer 3ph.
+  - Target current + phase auto-switch: use 3ph only when available power sustains >= 3ph minimum
+    (18A*230 ~ 4.1kW) for phaseSwitchDelay, else 1ph; clamp amps to [minCurrent, maxCurrent];
+    apply via client.setState(socket, amps, phases).
+  - Optional observability: publish controller status (mode, charging, target amps, phases) via
+    MqttPublisher/mqttHandler.publishJson to e.g. alfen/controller/<charger>/<socket>.
+
+Supporting changes:
+  - AlfenModbusClient.java - add small read accessor(s) if needed: current phase count
+    (ITEM_NUM_PHASES) and/or socket max current to inform phase/clamp decisions.
+    getSocketRealPowerSum already exists. Minimal change.
+  - src/main/resources/application.properties - add documented writer.* defaults + topic keys.
+  - CLAUDE.md - add a "Charging controller" subsection (repo rule: update CLAUDE.md for new features).
+
+CRITICAL FILES
+--------------
+  - src/main/java/org/muizenhol/alfen/AlfenModbusWriter.java   (core logic + clock)
+  - src/main/java/org/muizenhol/alfen/WriterConfig.java        (config knobs)
+  - src/main/java/org/muizenhol/alfen/AlfenModbusClient.java   (read accessors, minor)
+  - src/main/resources/application.properties                 (defaults + topics)
+  - src/test/java/org/muizenhol/alfen/AlfenModbusWriterTest.java (extend)
+  - CLAUDE.md
+
+VERIFICATION
+------------
+  - Unit (primary): extend AlfenModbusWriterTest (mocked AlfenModbusClient + injectable clock).
+    Drive scenarios advancing simulated time and assert client.setState/disable: start/stop
+    debounce; cooldown blocks restart; immediate stop on budget spike; solar start/stop
+    thresholds; FAST respects maxGridPower; 1<->3 phase switch after phaseSwitchDelay;
+    stale-input disables. Reuse existing registerMock / write / writeEnergy helpers.
+  - Integration: a @QuarkusTest using MqttTestResource + mocked ModbusTcpClient (pattern from
+    AlfenModbusClientTest): publish a mode + grid-power MQTT messages, assert modbus writes.
+  - Build/run: ./gradlew test; then ./gradlew quarkusDev with modbus.write_enabled=true and
+    writer.enabled=true, publish to alfen/set/<charger>/<socket>/mode + grid topics, observe
+    logs and alfen/modbus/state/... / controller status topic.
+
+NOTES
+-----
+  - Defaults for timers/budget (PT2M/PT3M/PT5M, 7400W, 16A) are proposals - tune in
+    application.properties.
+
+========================================================================
+IMPLEMENTATION SUMMARY (completed)
+========================================================================
+
+Reworked the per-socket charging controller (AlfenModbusWriter) from a
+stateless instant-toggle into a debounced state machine with config-driven
+timers, matching the evcc-style load management described above.
+
+WriterConfig.java
+  - Replaced minPower with the full knob set: minCurrent/maxCurrent,
+    maxGridPower, spikePercent, startDelay/stopDelay/cooldown/phaseSwitchDelay,
+    solarStartPower/solarStopPower, inputTimeout, and configurable
+    gridConsumedTopic/gridProducedTopic.
+
+AlfenModbusWriter.java (full rewrite)
+  - Injectable Supplier<Instant> clock (defaults to Instant::now) so all
+    debounce/cooldown logic is unit-testable.
+  - Per-socket runtime state: charging, lastStop, startConditionSince /
+    stopConditionSince, currentPhases, phaseChangeSince.
+  - Control loop ordering: stale-input guard -> spike guard (immediate stop +
+    cooldown when grid import exceeds maxGridPower*(1+spikePercent/100)) ->
+    start/stop debounce -> cooldown block -> target current/phase.
+  - Per-mode logic: OFF disables; PV_ONLY starts above solarStartPower export /
+    stops below solarStopPower import; PV_AND_MIN always charges >= min current,
+    faster on surplus; FAST maximises within the grid budget
+    (maxGridPower + powerAvailable).
+  - Auto 1<->3-phase switching debounced by phaseSwitchDelay, current clamped
+    to [minCurrent, maxCurrent].
+  - Dropped the hardcoded solar topic (net grid power only); socket-filtered the
+    set-message handler; publishes controller status to
+    alfen/controller/<charger>/<socket>.
+
+Tests
+  - Rewrote AlfenModbusWriterTest with a mutable simulated clock covering:
+    start/stop debounce, cooldown blocking restart, immediate spike stop,
+    PV_ONLY thresholds, FAST budget + phase switch, and stale-input disable.
+  - Updated AlfenModbusClientTest integration test to publish a fresh grid
+    reading, and added zero-debounce test overrides to
+    src/test/resources/application.properties.
+
+Config & docs
+  - Documented writer.* defaults (and topics) in application.properties.
+  - Added a "Charging controller (load management)" subsection to CLAUDE.md.
+
+Decision worth flagging:
+  The PV_ONLY stop condition uses powerAvailable <= -solarStopPower (surplus
+  excluding the charger's own draw) rather than raw grid import, so the charger
+  doesn't immediately trip itself off by counting its own consumption -- the
+  raw-import spike guard remains based on actual grid draw.
+
+Status: ./gradlew test and ./gradlew assemble both green.

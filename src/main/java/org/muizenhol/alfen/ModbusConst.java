@@ -49,6 +49,7 @@ public class ModbusConst {
     public static final int ID_STATION_SERIAL_NUMBER = 157;
     public static final int ID_SOCKET_MAX_CURRENT = 1210;
     public static final int ID_NUM_PHASES = 1215;
+    public static final int ID_MODE3_STATE = 1201;
     public static final int ID_REAL_POWER_SUM = 344;
 
     public enum StartOffset {
@@ -96,6 +97,7 @@ public class ModbusConst {
             ));
 
     public static final Item ITEM_REAL_POWER_SUM = new Item("Real Power Sum", ID_REAL_POWER_SUM, 2, DataType.FLOAT32, Item.POWER_WATT);
+    public static final Item ITEM_REAL_ENERGY_DELIVERED_SUM = new Item("Real Energy Delivered Sum", 374, 4, DataType.FLOAT64, Item.ENERGY);
     /**
      * Socket specific data. To be read once per socket
      */
@@ -135,7 +137,7 @@ public class ModbusConst {
                     new Item("Real Energy Delivered Phase L1", 362, 4, DataType.FLOAT64),
                     new Item("Real Energy Delivered Phase L2", 366, 4, DataType.FLOAT64),
                     new Item("Real Energy Delivered Phase L3", 370, 4, DataType.FLOAT64),
-                    new Item("Real Energy Delivered Sum", 374, 4, DataType.FLOAT64, Item.ENERGY),
+                    ITEM_REAL_ENERGY_DELIVERED_SUM,
                     new Item("Real Energy Consumed Phase L1", 378, 4, DataType.FLOAT64),
                     new Item("Real Energy Consumed Phase L2", 382, 4, DataType.FLOAT64),
                     new Item("Real Energy Consumed Phase L3", 386, 4, DataType.FLOAT64),
@@ -158,7 +160,7 @@ public class ModbusConst {
     public static final Group STATUS =
             new Group("status", StartOffset.SOCKET_STATUS.offset, 16, List.of(
                     new Item("Availability", 1200, 1, DataType.UNSIGNED16),
-                    new Item("Mode 3 state", 1201, 5, DataType.STRING),
+                    new Item("Mode 3 state", ID_MODE3_STATE, 5, DataType.STRING),
                     new Item("Actual Applied Max Current", 1206, 2, DataType.FLOAT32, Item.CURRENT_2),
                     new Item("Modbus Slave Max Current valid time", 1208, 2, DataType.UNSIGNED32),
                     ITEM_MAX_CURRENT,
