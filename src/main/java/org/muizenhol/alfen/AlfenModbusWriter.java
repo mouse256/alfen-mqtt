@@ -87,8 +87,10 @@ public class AlfenModbusWriter implements AutoCloseable {
         mqttHandler.register(Pattern.compile(Pattern.quote(writerConfig.gridConsumedTopic())), writerConfig.gridConsumedTopic(), this::handlePowerConsumed);
         mqttHandler.register(Pattern.compile(Pattern.quote(writerConfig.gridProducedTopic())), writerConfig.gridProducedTopic(), this::handlePowerProduced);
         if (writerConfig.enabled()) {
+            LOG.info("Controller for {} ({}) enabled, charge mode: {}", chargerName, socket, chargeMode);
             timerId = vertx.setPeriodic(writerConfig.interval().toMillis(), this::update);
         } else {
+            LOG.info("Controller for {} ({}) disabled", chargerName, socket);
             timerId = 0;
         }
     }
@@ -112,10 +114,19 @@ public class AlfenModbusWriter implements AutoCloseable {
         String key = m.group(2);
         LOG.info("Incoming set message for {} ({}): {} -> {}", chargerName, msgSocket, key, payload);
         if (key.equalsIgnoreCase(KEY_MODE)) {
+            ChargeMode newMode;
             try {
-                chargeMode = ChargeMode.valueOf(payload.toUpperCase());
+                newMode = ChargeMode.valueOf(payload.toUpperCase());
             } catch (IllegalArgumentException e) {
                 LOG.warn("Unknown charge mode for {}: {}", topic, payload);
+                return;
+            }
+            ChargeMode oldMode = chargeMode;
+            chargeMode = newMode;
+            if (oldMode != newMode) {
+                LOG.info("Charge mode for {} ({}) changed: {} -> {}", chargerName, socket, oldMode, newMode);
+            } else {
+                LOG.info("Charge mode for {} ({}) unchanged: {}", chargerName, socket, newMode);
             }
         } else {
             LOG.warn("Invalid key: {}", topic);
@@ -351,6 +362,7 @@ public class AlfenModbusWriter implements AutoCloseable {
     /**
      * Stop charging and reset the debounce timers. When {@code cooldown} is true a cooldown period
      * is started during which charging may not resume.
+     * Needed to call this the whole time, as it needs to continue writing to the alfen register.
      */
     private void stop(Instant now, boolean cooldown) {
         charging = false;
