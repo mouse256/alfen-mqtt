@@ -122,8 +122,11 @@ public class AlfenModbusClientTest {
 
         Discovery capturedArgument = argumentCaptor.getValue();
         assertThat(capturedArgument.stateTopic(), equalTo("alfen/modbus/state/test1/1/socket_measurement"));
-        // 9 socket measurements + 6 controller entities + car connected
-        assertThat(capturedArgument.components().size(), equalTo(16));
+        // 9 socket measurements + 6 controller entities + car connected (+ estimated battery when configured)
+        boolean socEnabled = socConfig.batteryCapacity().isPresent();
+        assertThat(capturedArgument.components().size(), equalTo(socEnabled ? 17 : 16));
+        assertThat(capturedArgument.components().keySet().stream().anyMatch(k -> k.endsWith("_soc_estimate")),
+                equalTo(socEnabled));
         Select mode = (Select) capturedArgument.components().values().stream()
                 .filter(c -> c instanceof Select)
                 .findFirst().orElseThrow();
