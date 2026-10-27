@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 public class AlfenModbusClient implements AutoCloseable {
@@ -397,10 +398,12 @@ public class AlfenModbusClient implements AutoCloseable {
         }
 
         for (int s = 1; s <= nrOfSockets; s++) {
-            writers.put(s, new AlfenModbusWriter(vertx, this, name, s, mqttListener, writerConfig));
             int socket = s;
             socConfig.batteryCapacity().ifPresent(capacity ->
                     socEstimators.put(socket, new SocEstimator(vertx, this, name, socket, mqttListener, socConfig, capacity)));
+            SocEstimator estimator = socEstimators.get(socket);
+            Supplier<Optional<Double>> socSupplier = estimator == null ? Optional::empty : estimator::estimate;
+            writers.put(s, new AlfenModbusWriter(vertx, this, name, s, mqttListener, writerConfig, socSupplier));
 
             Map<String, Component> components = ModbusConst.SOCKET_MEASUREMENT.items().stream()
                     .filter(i -> i.discoveryInfo() != null)
@@ -491,6 +494,16 @@ public class AlfenModbusClient implements AutoCloseable {
                         .withSuggestedDisplayPrecision(0)
                         .withStateTopic(statusTopic)
                         .withValueTemplate("{{ value_json.phases }}")
+                        .build(),
+                new Sensor.Builder()
+                        .withName("Controller allowed grid import")
+                        .withUniqueId(uuid + "_controller_allowed_grid_import")
+                        .withDeviceClass(DeviceClass.POWER)
+                        .withUnitOfMeasurement("W")
+                        .withSuggestedDisplayPrecision(0)
+                        .withStateTopic(statusTopic)
+                        // only set in SMART mode with a known battery level
+                        .withValueTemplate("{{ value_json.allowedGridImport if value_json.allowedGridImport is not none else None }}")
                         .build(),
                 new Sensor.Builder()
                         .withName("Controller state")

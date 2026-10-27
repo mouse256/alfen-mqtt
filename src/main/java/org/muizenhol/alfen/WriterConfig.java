@@ -118,4 +118,30 @@ public interface WriterConfig {
     @WithDefault("slimmelezer/sensor/power_produced/state")
     String gridProducedTopic();
 
+    /**
+     * SMART mode: below this battery level (%) it always charges (like PV_AND_MIN).
+     */
+    @WithDefault("40")
+    int smartMinSoc();
+
+    /**
+     * SMART mode: grid import in W allowed at (and below) {@link #smartMinSoc()}. Measured like the
+     * PV_ONLY thresholds, i.e. as the grid power with the car charging at minimum current on 1 phase.
+     */
+    @WithDefault("1000")
+    int smartGridImportLow();
+
+    /**
+     * SMART mode: grid import in W allowed at 100%. Linear between {@link #smartGridImportLow()} and this.
+     */
+    @WithDefault("0")
+    int smartGridImportHigh();
+
+    /**
+     * SMART mode: charging stops when the grid import (with the car at minimum current) exceeds the
+     * allowed import by more than this many W, for {@link #stopDelay()}.
+     */
+    @WithDefault("500")
+    int smartStopHysteresis();
+
 }

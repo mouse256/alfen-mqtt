@@ -122,18 +122,18 @@ public class AlfenModbusClientTest {
 
         Discovery capturedArgument = argumentCaptor.getValue();
         assertThat(capturedArgument.stateTopic(), equalTo("alfen/modbus/state/test1/1/socket_measurement"));
-        // 9 socket measurements + 6 controller entities + car connected (+ estimated battery when configured)
+        // 9 socket measurements + 7 controller entities + car connected (+ estimated battery when configured)
         boolean socEnabled = socConfig.batteryCapacity().isPresent();
-        assertThat(capturedArgument.components().size(), equalTo(socEnabled ? 17 : 16));
+        assertThat(capturedArgument.components().size(), equalTo(socEnabled ? 18 : 17));
         assertThat(capturedArgument.components().keySet().stream().anyMatch(k -> k.endsWith("_soc_estimate")),
                 equalTo(socEnabled));
         Select mode = (Select) capturedArgument.components().values().stream()
                 .filter(c -> c instanceof Select)
                 .findFirst().orElseThrow();
-        assertThat(mode.getOptions(), equalTo(List.of("OFF", "PV_ONLY", "PV_AND_MIN", "FAST")));
+        assertThat(mode.getOptions(), equalTo(List.of("OFF", "PV_ONLY", "PV_AND_MIN", "FAST", "SMART")));
         assertThat(mode.getPlatform(), equalTo(Platform.SELECT));
         assertThat(capturedArgument.components().values().stream()
-                .filter(c -> c.getUniqueId().contains("_controller_")).count(), equalTo(6L));
+                .filter(c -> c.getUniqueId().contains("_controller_")).count(), equalTo(7L));
     }
 
     @Test

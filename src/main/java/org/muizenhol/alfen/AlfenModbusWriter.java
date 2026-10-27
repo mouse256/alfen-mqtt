@@ -51,6 +51,10 @@ public class AlfenModbusWriter implements AutoCloseable {
     private Instant phaseChangeSince = null;
     private Instant overLimitSince = null;
     private float targetCurrent = 0;
+    private final Supplier<Optional<Double>> socSupplier;
+    // Battery level read at the start of each update; empty when unknown.
+    private Optional<Double> currentSoc = Optional.empty();
+    private SmartPhase lastSmartPhase = null;
     // Last published controller state, used to log state changes only once.
     private ControllerState lastState = null;
     private Instant lastTimerEnd = null;
@@ -59,7 +63,22 @@ public class AlfenModbusWriter implements AutoCloseable {
         OFF,
         PV_ONLY,
         PV_AND_MIN,
-        FAST
+        FAST,
+        /**
+         * Below {@link WriterConfig#smartMinSoc()} like PV_AND_MIN; above it solar driven, with a grid
+         * import allowance that shrinks linearly from {@link WriterConfig#smartGridImportLow()} to
+         * {@link WriterConfig#smartGridImportHigh()} at 100%. Like PV_ONLY when the battery level is unknown.
+         */
+        SMART
+    }
+
+    /**
+     * Sub-phase of the SMART mode, depending on the car's battery level.
+     */
+    private enum SmartPhase {
+        UNKNOWN,
+        BELOW_MIN,
+        SOLAR
     }
 
     /**
@@ -98,10 +117,12 @@ public class AlfenModbusWriter implements AutoCloseable {
     /**
      * Status published for observability on {@code alfen/controller/<charger>/<socket>}.
      * {@code timerEnd} is the moment the running timer of {@code state} (start delay, cooldown,
-     * ...) expires, as ISO-8601 instant, or null when no timer is running.
+     * ...) expires, as ISO-8601 instant, or null when no timer is running. {@code soc} is the
+     * (estimated) battery level, null when unknown; {@code allowedGridImport} the grid import in W
+     * the SMART mode currently allows, null in other modes or when the battery level is unknown.
      */
     public record ControllerStatus(String mode, String state, boolean charging, float targetCurrent, int phases,
-                                   String timerEnd) {
+                                   String timerEnd, Double soc, Integer allowedGridImport) {
     }
 
     /**
@@ -125,11 +146,13 @@ public class AlfenModbusWriter implements AutoCloseable {
         return "alfen/controller/" + chargerName + "/" + socket;
     }
 
-    public AlfenModbusWriter(Vertx vertx, AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttHandler, WriterConfig writerConfig) {
-        this(vertx, client, chargerName, socket, mqttHandler, writerConfig, Instant::now);
+    public AlfenModbusWriter(Vertx vertx, AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttHandler, WriterConfig writerConfig,
+                             Supplier<Optional<Double>> socSupplier) {
+        this(vertx, client, chargerName, socket, mqttHandler, writerConfig, socSupplier, Instant::now);
     }
 
-    public AlfenModbusWriter(Vertx vertx, AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttHandler, WriterConfig writerConfig, Supplier<Instant> clock) {
+    public AlfenModbusWriter(Vertx vertx, AlfenModbusClient client, String chargerName, int socket, MqttHandler mqttHandler, WriterConfig writerConfig,
+                             Supplier<Optional<Double>> socSupplier, Supplier<Instant> clock) {
         LOG.info("Creating AlfenModbusWriter for {} (socket {})", chargerName, socket);
         this.client = client;
         this.vertx = vertx;
@@ -138,6 +161,7 @@ public class AlfenModbusWriter implements AutoCloseable {
         this.config = writerConfig;
         this.mqttHandler = mqttHandler;
         this.clock = clock;
+        this.socSupplier = socSupplier;
         // topic: alfen/set/<chargername>/<socket>/<key>
         Pattern pattern = Pattern.compile("alfen/set/" + chargerName + "/(\\d+)/(.*)");
 
@@ -248,6 +272,8 @@ public class AlfenModbusWriter implements AutoCloseable {
         Instant now = clock.get();
         ChargeMode mode = chargeMode;
         LOG.debug("update {} ({}) mode={}", chargerName, socket, mode);
+        currentSoc = socSupplier.get();
+        logSmartPhase(mode);
 
         if (mode == ChargeMode.OFF) {
             stop(now, false, ControllerState.OFF);
@@ -293,8 +319,13 @@ public class AlfenModbusWriter implements AutoCloseable {
 
     private void handleStart(Instant now, ChargeMode mode, int powerAvailable) {
         boolean wantStart = switch (mode) {
-            case PV_ONLY -> powerAvailable - minChargePower() >= config.solarStartPower();
+            case PV_ONLY -> pvOnlyStart(powerAvailable);
             case PV_AND_MIN, FAST -> true;
+            case SMART -> switch (smartPhase()) {
+                case UNKNOWN -> pvOnlyStart(powerAvailable);
+                case BELOW_MIN -> true;
+                case SOLAR -> powerAvailable - minChargePower() >= -allowedImport(currentSoc.get());
+            };
             case OFF -> false;
         };
 
@@ -307,9 +338,9 @@ public class AlfenModbusWriter implements AutoCloseable {
         if (startConditionSince == null) {
             startConditionSince = now;
         }
-        // The start delay only rides out short solar peaks in PV_ONLY; in the other modes the start
-        // condition always holds, so they start right away (the cooldown still applies).
-        Instant startAt = mode == ChargeMode.PV_ONLY ? startConditionSince.plus(config.startDelay()) : now;
+        // The start delay only rides out short solar peaks in the solar driven modes; in the other
+        // modes the start condition always holds, so they start right away (the cooldown still applies).
+        Instant startAt = isSolarDriven(mode) ? startConditionSince.plus(config.startDelay()) : now;
         Instant cooldownEnd = lastStop.plus(config.cooldown());
         if (!now.isBefore(startAt) && !inCooldown(now)) {
             LOG.info("Start conditions satisfied for {} ({}), starting to charge", chargerName, socket);
@@ -325,8 +356,14 @@ public class AlfenModbusWriter implements AutoCloseable {
 
     private void handleCharging(Instant now, ChargeMode mode, int powerAvailable) {
         boolean wantStop = switch (mode) {
-            case PV_ONLY -> powerAvailable - minChargePower() <= -config.solarStopPower();
+            case PV_ONLY -> pvOnlyStop(powerAvailable);
             case PV_AND_MIN, FAST -> false;
+            case SMART -> switch (smartPhase()) {
+                case UNKNOWN -> pvOnlyStop(powerAvailable);
+                case BELOW_MIN -> false;
+                case SOLAR -> powerAvailable - minChargePower()
+                        < -allowedImport(currentSoc.get()) - config.smartStopHysteresis();
+            };
             case OFF -> true;
         };
 
@@ -383,8 +420,70 @@ public class AlfenModbusWriter implements AutoCloseable {
         return switch (mode) {
             case PV_ONLY, PV_AND_MIN -> powerAvailable;
             case FAST -> config.maxGridPower() + powerAvailable;
+            case SMART -> currentSoc.map(soc -> powerAvailable + allowedImport(soc)).orElse(powerAvailable);
             case OFF -> 0;
         };
+    }
+
+    private boolean pvOnlyStart(int powerAvailable) {
+        return powerAvailable - minChargePower() >= config.solarStartPower();
+    }
+
+    private boolean pvOnlyStop(int powerAvailable) {
+        return powerAvailable - minChargePower() <= -config.solarStopPower();
+    }
+
+    /**
+     * Whether the start condition depends on solar, so it gets the start delay.
+     */
+    private boolean isSolarDriven(ChargeMode mode) {
+        return mode == ChargeMode.PV_ONLY || (mode == ChargeMode.SMART && smartPhase() != SmartPhase.BELOW_MIN);
+    }
+
+    private SmartPhase smartPhase() {
+        if (currentSoc.isEmpty()) {
+            return SmartPhase.UNKNOWN;
+        }
+        return currentSoc.get() < config.smartMinSoc() ? SmartPhase.BELOW_MIN : SmartPhase.SOLAR;
+    }
+
+    /**
+     * Grid import in W the SMART mode allows at the given battery level: {@link WriterConfig#smartGridImportLow()}
+     * up to {@link WriterConfig#smartMinSoc()}, {@link WriterConfig#smartGridImportHigh()} at 100%, linear in between.
+     */
+    int allowedImport(double soc) {
+        double minSoc = config.smartMinSoc();
+        if (soc <= minSoc) {
+            return config.smartGridImportLow();
+        }
+        if (soc >= 100) {
+            return config.smartGridImportHigh();
+        }
+        double fraction = (soc - minSoc) / (100 - minSoc);
+        return (int) Math.round(config.smartGridImportLow()
+                + (config.smartGridImportHigh() - config.smartGridImportLow()) * fraction);
+    }
+
+    /**
+     * Log once when the SMART mode switches between its sub-phases.
+     */
+    private void logSmartPhase(ChargeMode mode) {
+        if (mode != ChargeMode.SMART) {
+            lastSmartPhase = null;
+            return;
+        }
+        SmartPhase phase = smartPhase();
+        if (phase == lastSmartPhase) {
+            return;
+        }
+        lastSmartPhase = phase;
+        switch (phase) {
+            case UNKNOWN -> LOG.info("SMART {} ({}): battery level unknown, behaving like PV_ONLY", chargerName, socket);
+            case BELOW_MIN -> LOG.info("SMART {} ({}): battery {}% below minimum {}%, charging like PV_AND_MIN (allowed grid import {} W)",
+                    chargerName, socket, String.format("%.1f", currentSoc.get()), config.smartMinSoc(), allowedImport(currentSoc.get()));
+            case SOLAR -> LOG.info("SMART {} ({}): battery {}% above minimum {}%, solar phase (allowed grid import now {} W)",
+                    chargerName, socket, String.format("%.1f", currentSoc.get()), config.smartMinSoc(), allowedImport(currentSoc.get()));
+        }
     }
 
     /**
@@ -524,7 +623,9 @@ public class AlfenModbusWriter implements AutoCloseable {
             mqttHandler.publishJson(
                     statusTopic(chargerName, socket),
                     new ControllerStatus(mode.name(), state.name(), charging, targetCurrent, phases,
-                            timerEnd == null ? null : timerEnd.toString())
+                            timerEnd == null ? null : timerEnd.toString(),
+                            currentSoc.map(soc -> Math.round(soc * 10) / 10.0).orElse(null),
+                            mode == ChargeMode.SMART ? currentSoc.map(this::allowedImport).orElse(null) : null)
             );
         } catch (Exception e) {
             LOG.debug("Could not publish controller status", e);
