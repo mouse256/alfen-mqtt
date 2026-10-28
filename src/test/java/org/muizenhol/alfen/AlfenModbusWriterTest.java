@@ -321,40 +321,59 @@ public class AlfenModbusWriterTest {
     public void testPvOnlyThresholds() {
         setMode("PV_ONLY");
 
-        // surplus only just covers the minimum charge power (6A * 230V = 1380W): 1800 - 1380 = 420W
-        // projected export, below the 500W start threshold
-        grid(1800);
+        // Spec: start when raw export > solar-start-power (500W), even if it means importing from grid.
+        // 400W export is below the threshold: no start.
+        grid(400);
         tick();
         verifyDisabled();
+        assertThat(lastStatus().state(), equalTo("WAITING_FOR_SURPLUS"));
 
-        // projected export 1900 - 1380 = 520W, but debounce not satisfied
-        grid(1900);
+        // 600W export > 500W threshold: start delay begins (spec allows grid import on start).
+        grid(600);
         tick();
         verifyDisabled();
+        assertThat(lastStatus().state(), equalTo("START_DELAY"));
 
+        // Start delay elapsed: charging starts. Budget 600W → 2.6A, clamped to 6A minimum.
         advance(Duration.ofMinutes(2).plusSeconds(1));
-        grid(1900);
-        tick();
-        verifySetState(1900 / 230.0, 1);
-
-        // from now on the car draws the minimum, which shows up in the grid reading
-        chargerPowerConsumed = 1380;
-
-        // mild import (surplus 480W): projected import 900W, below the 1000W stop threshold -> keep charging
-        grid(-900);
+        grid(600);
         tick();
         verifySetState(6, 1);
 
-        // projected import 1100W, over the stop threshold, but stop debounce not satisfied yet
+        // Car now draws minimum (1380W). Grid import 780W (600W surplus - 1380W draw = -780W).
+        chargerPowerConsumed = 1380;
+
+        // Spec: stop when actual grid import > solar-stop-power (1000W).
+        // Import 780W < 1000W: keep charging at minimum.
+        grid(-780);
+        tick();
+        verifySetState(6, 1);
+
+        // Import 1100W > 1000W: stop condition met, but debounce not satisfied yet.
         grid(-1100);
         tick();
         verifySetState(6, 1);
+        assertThat(lastStatus().state(), equalTo("STOP_DELAY"));
 
-        // stop delay elapsed -> stop
+        // Stop delay elapsed -> stop.
         advance(Duration.ofMinutes(3).plusSeconds(1));
         grid(-1100);
         tick();
         verifyDisabled();
+    }
+
+    @Test
+    public void testPvOnlyStopUsesActualGridImport() {
+        // Start charging with lots of surplus (3000W → 13A on 1 phase).
+        startCharging("PV_ONLY", 3000);
+
+        // Car draws 3000W. Solar drops to 1000W: actual grid import = 2000W > 1000W threshold.
+        chargerPowerConsumed = 3000;
+        grid(-2000);
+        tick();
+        // Spec: stop when actual import > solar-stop-power. Old code normalized to min current
+        // (1000 - 1380 = -380 > -1000 → no stop); new code uses raw grid power (-2000 < -1000 → stop).
+        assertThat(lastStatus().state(), equalTo("STOP_DELAY"));
     }
 
     @Test
@@ -591,8 +610,8 @@ public class AlfenModbusWriterTest {
         setMode("SMART");
         grid(2000);
         tick();
-        // no start delay, budget = surplus + low import = 3000W on 1 phase
-        verifySetState(3000 / 230.0, 1);
+        // Spec: below min-soc "same as PV_AND_MIN" → budget = surplus only (2000W), no extra grid import.
+        verifySetState(2000 / 230.0, 1);
         AlfenModbusWriter.ControllerStatus status = lastStatus();
         assertThat(status.state(), equalTo("CHARGING"));
         assertThat(status.allowedGridImport(), equalTo(1000));
@@ -604,6 +623,18 @@ public class AlfenModbusWriterTest {
         soc = 30.0;
         setMode("SMART");
         grid(-500);
+        tick();
+        verifySetState(6, 1);
+    }
+
+    @Test
+    public void testSmartBelowMinBudgetSameAsPvAndMin() {
+        // Spec: below min-soc "same as PV_AND_MIN" → budget = surplus only, no extra grid import.
+        // 500W surplus: PV_AND_MIN would give 500/230 = 2.17A clamped to 6A.
+        // Old code added smartGridImportLow (1000W): 1500/230 = 6.52A — this test catches that.
+        soc = 30.0;
+        setMode("SMART");
+        grid(500);
         tick();
         verifySetState(6, 1);
     }
@@ -684,7 +715,7 @@ public class AlfenModbusWriterTest {
         assertThat(status.allowedGridImport(), nullValue());
         assertThat(status.soc(), nullValue());
 
-        // PV_ONLY start threshold: net export - 1380 >= 500
+        // PV_ONLY start threshold: raw export >= 500W
         grid(1900);
         tick();
         assertThat(lastStatus().state(), equalTo("START_DELAY"));
@@ -712,6 +743,33 @@ public class AlfenModbusWriterTest {
     }
 
     @Test
+    public void testKeepAliveWithoutMeasurementWhenNotCharging() {
+        // No socket power measurement available (e.g., before first successful poll).
+        chargerPowerConsumed = null;
+        setMode("FAST");
+        grid(0);
+        tick();
+        // Spec: must actively keep sending commands, otherwise charger enters safe mode.
+        // Even without a measurement, a write (disable) must happen.
+        verify(client).disable(SOCKET);
+        verify(client, never()).setState(eq(SOCKET), anyFloat(), anyInt());
+        assertThat(lastStatus().state(), equalTo("NO_MEASUREMENT"));
+    }
+
+    @Test
+    public void testKeepAliveWithoutMeasurementWhenCharging() {
+        // Start charging first.
+        startCharging("PV_AND_MIN", 0);
+        // Now the measurement disappears.
+        chargerPowerConsumed = null;
+        tick();
+        // Keep-alive: re-apply the last charging state so the charger doesn't enter safe mode.
+        verify(client).setState(eq(SOCKET), anyFloat(), eq(1));
+        verify(client, never()).disable(SOCKET);
+        assertThat(lastStatus().state(), equalTo("NO_MEASUREMENT"));
+    }
+
+    @Test
     public void testFastBudgetAndPhaseSwitch() {
         startCharging("FAST", 0);
 
@@ -726,6 +784,45 @@ public class AlfenModbusWriterTest {
         grid(0);
         tick();
         verifySetState(7400 / (230.0 * 3), 3);
+    }
+
+    @Test
+    public void testPvAndMinScenarios() {
+        // Scenario 1: Already importing from grid -> should charge at 6A
+        setMode("PV_AND_MIN");
+        grid(-1000); // importing 1000W
+        tick();
+        verifySetState(6, 1);
+
+        // Scenario 2: Importing heavily (4000W) but below max-grid-power (7400W) -> should charge at 6A.
+        // Spec: "charge at least at 6A all the time (unless the grid import is at capacity)".
+        beforeEach();
+        setMode("PV_AND_MIN");
+        grid(-4000); // importing 4000W, budget 7400W
+        tick();
+        verifySetState(6, 1);
+
+        // Scenario 2b: Importing at/over max-grid-power -> should NOT charge (grid at capacity).
+        beforeEach();
+        setMode("PV_AND_MIN");
+        grid(-8000); // importing 8000W > 7400W budget
+        tick();
+        verifyDisabled();
+        assertThat(lastStatus().state(), equalTo("WAITING_FOR_SURPLUS"));
+
+        // Scenario 3: Exporting a little (200W) -> should charge at 6A
+        beforeEach();
+        setMode("PV_AND_MIN");
+        grid(200); // exporting 200W
+        tick();
+        verifySetState(6, 1);
+
+        // Scenario 4: Exporting a lot (2000W) -> should charge at 2000W/230V
+        beforeEach();
+        setMode("PV_AND_MIN");
+        grid(2000); // exporting 2000W
+        tick();
+        verifySetState(2000.0 / 230.0, 1);
     }
 
     /**

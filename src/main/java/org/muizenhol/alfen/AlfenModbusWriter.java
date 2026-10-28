@@ -297,6 +297,13 @@ public class AlfenModbusWriter implements AutoCloseable {
         Optional<Integer> chargerDrawOpt = client.getSocketRealPowerSum(socket);
         if (chargerDrawOpt.isEmpty()) {
             LOG.debug("No socket power measurement for socket {}", socket);
+            // Keep-alive: the spec requires actively sending commands to the charger, otherwise it
+            // enters safe mode. Re-apply the current state so a write happens even without a measurement.
+            if (charging) {
+                client.setState(socket, targetCurrent, currentPhases);
+            } else {
+                client.disable(socket);
+            }
             publishStatus(mode, ControllerState.NO_MEASUREMENT, null, charging, charging ? targetCurrent : 0, currentPhases);
             return;
         }
@@ -306,6 +313,17 @@ public class AlfenModbusWriter implements AutoCloseable {
         int gridImport = -powerGrid;
         LOG.debug("Power grid: {}, charger draw: {}, available: {}", powerGrid, chargerDraw, powerAvailable);
 
+        // Hard requirement (spec): never consume too much from the grid. Don't start charging when
+        // the grid import is already at/over the budget — this prevents a start→over-limit→stop→
+        // cooldown→start cycle in modes that always want to start (PV_AND_MIN, FAST, SMART below
+        // min-soc). For solar-driven modes the start thresholds already prevent this.
+        if (!charging && gridImport >= config.maxGridPower()) {
+            LOG.debug("Not starting {} ({}) in mode {}: grid import {}W is at/over budget {}W",
+                    chargerName, socket, mode, gridImport, config.maxGridPower());
+            disable(mode, ControllerState.WAITING_FOR_SURPLUS, null);
+            return;
+        }
+
         if (charging && handleOverLimit(now, mode, powerAvailable, gridImport)) {
             return;
         }
@@ -313,7 +331,7 @@ public class AlfenModbusWriter implements AutoCloseable {
         if (!charging) {
             handleStart(now, mode, powerAvailable);
         } else {
-            handleCharging(now, mode, powerAvailable);
+            handleCharging(now, mode, powerAvailable, powerGrid);
         }
     }
 
@@ -354,12 +372,12 @@ public class AlfenModbusWriter implements AutoCloseable {
         }
     }
 
-    private void handleCharging(Instant now, ChargeMode mode, int powerAvailable) {
+    private void handleCharging(Instant now, ChargeMode mode, int powerAvailable, int powerGrid) {
         boolean wantStop = switch (mode) {
-            case PV_ONLY -> pvOnlyStop(powerAvailable);
+            case PV_ONLY -> pvOnlyStop(powerGrid);
             case PV_AND_MIN, FAST -> false;
             case SMART -> switch (smartPhase()) {
-                case UNKNOWN -> pvOnlyStop(powerAvailable);
+                case UNKNOWN -> pvOnlyStop(powerGrid);
                 case BELOW_MIN -> false;
                 case SOLAR -> powerAvailable - minChargePower()
                         < -allowedImport(currentSoc.get()) - config.smartStopHysteresis();
@@ -420,17 +438,33 @@ public class AlfenModbusWriter implements AutoCloseable {
         return switch (mode) {
             case PV_ONLY, PV_AND_MIN -> powerAvailable;
             case FAST -> config.maxGridPower() + powerAvailable;
-            case SMART -> currentSoc.map(soc -> powerAvailable + allowedImport(soc)).orElse(powerAvailable);
+            // SMART below min-soc: same budget as PV_AND_MIN (spec: "same as the PV_AND_MIN mode").
+            // SMART in the solar phase: surplus plus the allowed grid import.
+            // SMART with unknown battery: same as PV_ONLY.
+            case SMART -> switch (smartPhase()) {
+                case BELOW_MIN, UNKNOWN -> powerAvailable;
+                case SOLAR -> powerAvailable + allowedImport(currentSoc.get());
+            };
             case OFF -> 0;
         };
     }
 
+    /**
+     * PV_ONLY start: the spec says to start when there is more than {@code solarStartPower} exported
+     * to the grid, even if that means importing the rest from the grid (the car cannot charge below
+     * minimum current). So the threshold is on the raw surplus, not on the surplus minus minimum charge.
+     */
     private boolean pvOnlyStart(int powerAvailable) {
-        return powerAvailable - minChargePower() >= config.solarStartPower();
+        return powerAvailable >= config.solarStartPower();
     }
 
-    private boolean pvOnlyStop(int powerAvailable) {
-        return powerAvailable - minChargePower() <= -config.solarStopPower();
+    /**
+     * PV_ONLY stop: the spec says to stop when the import from the grid is above
+     * {@code solarStopPower}. This is the actual grid import (including the car), not normalized
+     * to minimum current.
+     */
+    private boolean pvOnlyStop(int powerGrid) {
+        return powerGrid < -config.solarStopPower();
     }
 
     /**
