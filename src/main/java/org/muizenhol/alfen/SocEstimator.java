@@ -99,7 +99,7 @@ public class SocEstimator implements AutoCloseable {
         update();
     }
 
-    synchronized Optional<Double> estimate() {
+    public synchronized Optional<Double> estimate() {
         if (carSoc == null) {
             return Optional.empty();
         }

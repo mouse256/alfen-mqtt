@@ -38,6 +38,7 @@ public class AlfenModbusWriterTest {
     private static final int SOCKET = 25;
     private static final String MODE_STATE_TOPIC = "alfen/controller/" + CHARGER_NAME + "/" + SOCKET + "/mode";
     private Integer chargerPowerConsumed;
+    private Double soc;
     private Instant now;
 
     @BeforeEach
@@ -50,7 +51,8 @@ public class AlfenModbusWriterTest {
         Supplier<Instant> clock = () -> now;
         config = testConfig();
 
-        writer = new AlfenModbusWriter(null, client, CHARGER_NAME, SOCKET, mqttHandler, config, clock);
+        soc = null;
+        writer = new AlfenModbusWriter(null, client, CHARGER_NAME, SOCKET, mqttHandler, config, () -> Optional.ofNullable(soc), clock);
 
         listenerSet = registerMock("alfen/set/+/+/+");
         listenerPowerConsumed = registerMock(config.gridConsumedTopic());
@@ -128,6 +130,22 @@ public class AlfenModbusWriterTest {
 
             public String gridProducedTopic() {
                 return "slimmelezer/sensor/power_produced/state";
+            }
+
+            public int smartMinSoc() {
+                return 40;
+            }
+
+            public int smartGridImportLow() {
+                return 1000;
+            }
+
+            public int smartGridImportHigh() {
+                return 0;
+            }
+
+            public int smartStopHysteresis() {
+                return 500;
             }
         };
     }
@@ -554,6 +572,133 @@ public class AlfenModbusWriterTest {
         AlfenModbusWriter.ControllerStatus status = lastStatus();
         assertThat(status.state(), equalTo("COOLDOWN"));
         assertThat(status.timerEnd(), equalTo(now.plus(config.cooldown()).toString()));
+    }
+
+    // SMART: min charge power is 6A * 230V = 1380W; the mocked charger draws nothing, so
+    // powerAvailable == net export and gridAtMin == net export - 1380.
+
+    @Test
+    public void testSmartAllowedImportInterpolation() {
+        assertThat(writer.allowedImport(20), equalTo(1000));
+        assertThat(writer.allowedImport(40), equalTo(1000));
+        assertThat(writer.allowedImport(70), equalTo(500));
+        assertThat(writer.allowedImport(100), equalTo(0));
+    }
+
+    @Test
+    public void testSmartBelowMinStartsImmediately() {
+        soc = 30.0;
+        setMode("SMART");
+        grid(2000);
+        tick();
+        // no start delay, budget = surplus + low import = 3000W on 1 phase
+        verifySetState(3000 / 230.0, 1);
+        AlfenModbusWriter.ControllerStatus status = lastStatus();
+        assertThat(status.state(), equalTo("CHARGING"));
+        assertThat(status.allowedGridImport(), equalTo(1000));
+        assertThat(status.soc(), closeTo(30, 0.01));
+    }
+
+    @Test
+    public void testSmartBelowMinChargesWithoutSun() {
+        soc = 30.0;
+        setMode("SMART");
+        grid(-500);
+        tick();
+        verifySetState(6, 1);
+    }
+
+    @Test
+    public void testSmartSolarStartThreshold() {
+        soc = 70.0; // allowed import 500W -> start when gridAtMin >= -500, i.e. net export >= 880
+        setMode("SMART");
+        grid(780);
+        tick();
+        verifyDisabled();
+        assertThat(lastStatus().state(), equalTo("WAITING_FOR_SURPLUS"));
+
+        grid(980);
+        tick();
+        verifyDisabled();
+        assertThat(lastStatus().state(), equalTo("START_DELAY"));
+
+        advance(config.startDelay().plusSeconds(1));
+        grid(980);
+        tick();
+        // budget = 980 + 500
+        verifySetState(1480 / 230.0, 1);
+    }
+
+    @Test
+    public void testSmartSolarStopWithHysteresis() {
+        soc = 70.0;
+        startCharging("SMART", 980);
+
+        // gridAtMin -900: above the stop threshold (-500 - 500) -> keeps charging
+        grid(480);
+        tick();
+        assertThat(lastStatus().state(), equalTo("CHARGING"));
+
+        // gridAtMin -1100: below the stop threshold -> stops after the stop delay
+        grid(280);
+        tick();
+        assertThat(lastStatus().state(), equalTo("STOP_DELAY"));
+        advance(config.stopDelay().plusSeconds(1));
+        grid(280);
+        tick();
+        verifyDisabled();
+        assertThat(lastStatus().state(), equalTo("COOLDOWN"));
+    }
+
+    @Test
+    public void testSmartCrossingMinimumWithoutSun() {
+        soc = 30.0;
+        setMode("SMART");
+        grid(-200);
+        tick();
+        verify(client).setState(eq(SOCKET), anyFloat(), eq(1));
+
+        // 41%: allowed import ~983W, stop below gridAtMin -1483
+        soc = 41.0;
+        grid(0); // gridAtMin -1380
+        tick();
+        assertThat(lastStatus().state(), equalTo("CHARGING"));
+
+        grid(-200); // gridAtMin -1580
+        tick();
+        assertThat(lastStatus().state(), equalTo("STOP_DELAY"));
+        advance(config.stopDelay().plusSeconds(1));
+        grid(-200);
+        tick();
+        verifyDisabled();
+    }
+
+    @Test
+    public void testSmartUnknownSocLikePvOnly() {
+        setMode("SMART");
+        grid(0);
+        tick();
+        verifyDisabled();
+        AlfenModbusWriter.ControllerStatus status = lastStatus();
+        assertThat(status.state(), equalTo("WAITING_FOR_SURPLUS"));
+        assertThat(status.allowedGridImport(), nullValue());
+        assertThat(status.soc(), nullValue());
+
+        // PV_ONLY start threshold: net export - 1380 >= 500
+        grid(1900);
+        tick();
+        assertThat(lastStatus().state(), equalTo("START_DELAY"));
+    }
+
+    @Test
+    public void testAllowedImportOnlyInSmart() {
+        soc = 70.0;
+        setMode("PV_ONLY");
+        grid(0);
+        tick();
+        AlfenModbusWriter.ControllerStatus status = lastStatus();
+        assertThat(status.allowedGridImport(), nullValue());
+        assertThat(status.soc(), closeTo(70, 0.01));
     }
 
     @Test
