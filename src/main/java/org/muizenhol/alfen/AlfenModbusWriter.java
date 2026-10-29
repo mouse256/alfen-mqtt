@@ -269,6 +269,17 @@ public class AlfenModbusWriter implements AutoCloseable {
     }
 
     void update(Long aLong) {
+        try {
+            runUpdate();
+        } catch (Exception e) {
+            // Never let an exception escape a periodic timer handler: vert.x cancels the timer
+            // when the handler throws, and a dead controller means no more keep-alive writes,
+            // so the charger would fall back to its safe current (validity time, default 60s).
+            LOG.error("Controller update for {} ({}) failed", chargerName, socket, e);
+        }
+    }
+
+    private void runUpdate() {
         Instant now = clock.get();
         ChargeMode mode = chargeMode;
         LOG.debug("update {} ({}) mode={}", chargerName, socket, mode);

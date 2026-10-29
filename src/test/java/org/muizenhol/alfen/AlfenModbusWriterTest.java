@@ -770,6 +770,23 @@ public class AlfenModbusWriterTest {
     }
 
     @Test
+    public void testUpdateExceptionDoesNotKillController() {
+        // A failing dependency must not make update() throw: vert.x cancels a periodic timer
+        // whose handler throws, and a dead controller means no more keep-alive writes, so the
+        // charger would fall back to its safe current.
+        doThrow(new RuntimeException("boom")).doReturn(Optional.of(0))
+                .when(client).getSocketRealPowerSum(SOCKET);
+        setMode("FAST");
+        grid(0);
+        writer.update(1L); // must not throw
+        verify(client, never()).setState(anyInt(), anyFloat(), anyInt());
+
+        // the controller recovers on the next update
+        writer.update(1L);
+        verify(client).setState(eq(SOCKET), eq(16f), eq(1));
+    }
+
+    @Test
     public void testFastBudgetAndPhaseSwitch() {
         startCharging("FAST", 0);
 
