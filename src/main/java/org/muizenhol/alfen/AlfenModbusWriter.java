@@ -88,6 +88,8 @@ public class AlfenModbusWriter implements AutoCloseable {
     public enum ControllerState {
         /** Mode is OFF. */
         OFF,
+        /** No vehicle connected to the socket; charging is disabled until one is plugged in. */
+        NOT_CONNECTED,
         /** Grid power readings are too old, charging is disabled for safety. */
         STALE_INPUT,
         /** No power measurement of the socket available yet. */
@@ -288,6 +290,18 @@ public class AlfenModbusWriter implements AutoCloseable {
 
         if (mode == ChargeMode.OFF) {
             stop(now, false, ControllerState.OFF);
+            return;
+        }
+
+        // No vehicle connected: nothing to charge. Disable the socket and report NOT_CONNECTED.
+        // When the state is unknown (Optional.empty) we proceed — the connection state is
+        // best-effort, we must not block charging on a missing reading.
+        Optional<Boolean> vehicleConnected = client.isVehicleConnected(socket);
+        if (vehicleConnected.isPresent() && !vehicleConnected.get()) {
+            if (charging) {
+                LOG.info("Vehicle disconnected from {} ({}), stopping charging", chargerName, socket);
+            }
+            stop(now, false, ControllerState.NOT_CONNECTED);
             return;
         }
 
