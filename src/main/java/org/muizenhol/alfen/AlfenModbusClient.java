@@ -7,7 +7,6 @@ import com.digitalpetri.modbus.pdu.ReadHoldingRegistersResponse;
 import com.digitalpetri.modbus.pdu.WriteMultipleRegistersRequest;
 import com.digitalpetri.modbus.pdu.WriteMultipleRegistersResponse;
 import com.digitalpetri.modbus.tcp.client.NettyTcpClientTransport;
-import io.quarkus.runtime.Quarkus;
 import io.vertx.core.Vertx;
 import org.muizenhol.homeassistant.discovery.Discovery;
 import org.muizenhol.homeassistant.discovery.DeviceClass;
@@ -33,6 +32,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -58,6 +59,29 @@ public class AlfenModbusClient implements AutoCloseable {
     private long pollTimerId = -1;
     private long readCount = 0;
     private int errorCount = 0;
+
+    /**
+     * Consecutive modbus request failures (reads or writes), reset by any success. The modbus
+     * client library only reconnects on its own when the TCP channel is closed cleanly; a
+     * half-open connection (charger rebooted, NAT/firewall dropped the mapping) never triggers
+     * that and every request would time out forever. Once this reaches
+     * {@link #RECONNECT_AFTER_FAILURES} a forced reconnect is scheduled.
+     */
+    private final AtomicInteger consecutiveIoFailures = new AtomicInteger();
+    private final AtomicBoolean reconnectPending = new AtomicBoolean();
+    /**
+     * How many consecutive modbus request failures trigger a forced reconnect. One 5s request
+     * timeout can be transient; two in a row mean the connection is dead. The charger falls back
+     * to its safe current when the max current register is not rewritten within its validity time
+     * (default 60s), so the reconnect must happen well within that window.
+     */
+    private static final int RECONNECT_AFTER_FAILURES = 2;
+    private volatile boolean closed = false;
+    /**
+     * Whether {@link #sendDiscovery()} succeeded (writers/soc estimators created). Retried by the
+     * poll loop while the charger was unreachable at startup.
+     */
+    private volatile boolean discoveryDone = false;
 
     /**
      * Poll-loop health, used by {@link HealthResource} to detect a wedged worker (deadlock/hang) or
@@ -116,13 +140,8 @@ public class AlfenModbusClient implements AutoCloseable {
     }
 
     void start(boolean pollEnabled) {
-        try {
-            client.connect();
-            sendDiscovery();
-        } catch (Exception e) {
-            LOG.warn("Error connecting to modbus client: {}", name, e);
-            return;
-        }
+        ensureConnected();
+        discoveryDone = sendDiscovery();
 
         if (pollEnabled) {
             pollTimerId = vertx.setPeriodic(0, Duration.ofSeconds(1).toMillis(), this::poll);
@@ -132,6 +151,23 @@ public class AlfenModbusClient implements AutoCloseable {
 //            } else {
 //                LOG.info("Startup: write disabled");
 //            }
+        }
+    }
+
+    /**
+     * Connect when not connected. Never gives up: a charger that is briefly unreachable at
+     * startup is retried by the poll loop (forced reconnect on I/O failures + discovery retry),
+     * so the application does not end up without a modbus connection until the next restart.
+     */
+    private void ensureConnected() {
+        try {
+            if (!client.isConnected()) {
+                LOG.info("Connecting to modbus client {}", name);
+                client.connect();
+                LOG.info("Connected to modbus client {}", name);
+            }
+        } catch (Exception e) {
+            LOG.warn("Error connecting to modbus client {}: {}", name, e.toString());
         }
     }
 
@@ -145,6 +181,7 @@ public class AlfenModbusClient implements AutoCloseable {
 
     @Override
     public void close() {
+        closed = true;
         if (pollTimerId != -1) {
             vertx.cancelTimer(pollTimerId);
         }
@@ -169,21 +206,78 @@ public class AlfenModbusClient implements AutoCloseable {
         lastPollAttemptMs = System.currentTimeMillis();
         runOnModbusThread(() -> {
             try {
+                // A forced reconnect (connection lost) takes priority over everything else.
+                maybeReconnect();
+                if (!discoveryDone && client.isConnected()) {
+                    discoveryDone = sendDiscovery();
+                }
                 pollRead();
                 readCount++;
                 errorCount = 0;
                 lastPollSuccessMs = System.currentTimeMillis();
             } catch (Exception e) {
                 errorCount++;
-                LOG.warn("Error polling of modbus client", e);
-                if (errorCount > 3) {
-                    LOG.error("3 times in a row a read error, quitting");
-                    Quarkus.asyncExit(100);
-                }
+                LOG.warn("Error polling of modbus client {} ({} in a row)", name, errorCount, e);
+                // Deliberately no Quarkus.asyncExit here: killing the process stops the
+                // keep-alive writes to the charger, which then falls back to its safe current
+                // once the validity time (default 60s) expires. The poll loop recovers by
+                // itself via the forced reconnect; /health/live still reports DOWN for a
+                // truly wedged loop so an external watchdog (Docker HEALTHCHECK) can restart.
             } finally {
                 lastPollFinishMs = System.currentTimeMillis();
             }
         });
+    }
+
+    /**
+     * Queue a write of the desired socket states. Runs on the modbus thread, after a pending
+     * forced reconnect, so keep-alive writes resume immediately once the connection is back.
+     */
+    private void runWriteTask() {
+        runOnModbusThread(() -> {
+            maybeReconnect();
+            writeData();
+        });
+    }
+
+    private void onIoSuccess() {
+        consecutiveIoFailures.set(0);
+        reconnectPending.set(false);
+    }
+
+    private void onIoFailure() {
+        int failures = consecutiveIoFailures.incrementAndGet();
+        if (failures >= RECONNECT_AFTER_FAILURES) {
+            reconnectPending.set(true);
+        }
+    }
+
+    /**
+     * Run a pending forced reconnect. Only ever called on the modbus thread (start of the poll
+     * and write tasks), so reconnects are serialized with the reads/writes they interrupt.
+     */
+    private void maybeReconnect() {
+        if (closed || !reconnectPending.get()) {
+            return;
+        }
+        reconnectPending.set(false);
+        LOG.warn("Modbus connection to {} lost, reconnecting", name);
+        try {
+            try {
+                client.disconnect();
+            } catch (Exception e) {
+                LOG.debug("Error while disconnecting modbus client {}", name, e);
+            }
+            client.connect();
+            LOG.info("Reconnected to modbus client {}", name);
+            // Refresh the max current register right away: the charger falls back to its safe
+            // current when it is not rewritten within its validity time (default 60s).
+            writeData();
+        } catch (Exception e) {
+            // The modbus client keeps retrying in the background (persistent connection) and
+            // the next I/O failures schedule another attempt; the application keeps running.
+            LOG.warn("Reconnecting to modbus client {} failed, will retry: {}", name, e.toString());
+        }
     }
 
     void pollRead() {
@@ -268,10 +362,12 @@ public class AlfenModbusClient implements AutoCloseable {
             Map<Integer, Object> values = group.items().stream()
                     .collect(Collectors.toMap(ModbusConst.Item::start, i -> convert(i, buf, group)));
             mqttPublisher.sendModbus(name, group.name(), values, unitId);
+            onIoSuccess();
 
             return Optional.of(values);
 
         } catch (Exception e) {
+            onIoFailure();
             LOG.warn("Error reading data", e);
         }
         return Optional.empty();
@@ -369,14 +465,21 @@ public class AlfenModbusClient implements AutoCloseable {
             LOG.debug("Wrinting to {} (unit: {}, size: {})", address, unitId, item.size() * 2);
             WriteMultipleRegistersResponse response = client.writeMultipleRegisters(unitId, new WriteMultipleRegistersRequest(address, item.size(), values));
             LOG.debug("WriteMultipleRegistersResponse: {}", response.getFunctionCode());
-
+            onIoSuccess();
 
         } catch (Exception e) {
+            // A failed write means the keep-alive did not reach the charger; count it so a dead
+            // connection is detected and re-established.
+            onIoFailure();
             LOG.warn("Error writing data", e);
         }
     }
 
-    public void sendDiscovery() {
+    /**
+     * @return true when the discovery (and the writers/soc estimators) was created, false when
+     * the charge point could not be read (e.g. unreachable at startup; retried by the poll loop).
+     */
+    private boolean sendDiscovery() {
         LOG.info("Generating discovery for {}", name);
 
 
@@ -386,7 +489,7 @@ public class AlfenModbusClient implements AutoCloseable {
                 .orElse(-1);
         if (nrOfSockets == -1) {
             LOG.warn("Can't fetch number of sockets, can't publish discovery info for {}", name);
-            return;
+            return false;
         }
 
         String serial = (String) readData(ModbusConst.PRODUCT_IDENTIFICATION, ModbusConst.ADDR_GENERIC, false)
@@ -394,7 +497,7 @@ public class AlfenModbusClient implements AutoCloseable {
                 .orElse(null);
         if (serial == null) {
             LOG.warn("Can't fetch serial number, can't publish discovery info for {}", name);
-            return;
+            return false;
         }
 
         for (int s = 1; s <= nrOfSockets; s++) {
@@ -455,6 +558,7 @@ public class AlfenModbusClient implements AutoCloseable {
             );
             mqttPublisher.sendDiscovery(discovery);
         }
+        return true;
     }
 
     /**
@@ -534,14 +638,14 @@ public class AlfenModbusClient implements AutoCloseable {
             setStates.put(socket, new SetState(false, 0, 1));
 
         }
-        runOnModbusThread(this::writeData);
+        runWriteTask();
     }
 
     public void setState(int socket, float maxCurrent, int numPhases) {
         LOG.info("Set socket {} to enabled, maxCurrent: {}, numPhases: {}", socket, maxCurrent, numPhases);
         setStates.put(socket, new SetState(true, maxCurrent, numPhases));
 
-        runOnModbusThread(this::writeData);
+        runWriteTask();
     }
 
     /**

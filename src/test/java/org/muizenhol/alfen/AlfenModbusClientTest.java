@@ -34,6 +34,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
@@ -94,8 +95,34 @@ public class AlfenModbusClientTest {
         testMqttServer.cleanup();
     }
 
+    /**
+     * When true, reads and writes fail (dead connection). Switched at runtime instead of
+     * re-stubbing the mock: the poll loop invokes the mock from the modbus thread, and
+     * re-stubbing a mock while another thread calls it makes Mockito fail with
+     * UnfinishedStubbingException.
+     */
+    private final AtomicBoolean ioBroken = new AtomicBoolean(false);
+    /**
+     * When true, {@code connect()} fails (charger unreachable). See {@link #ioBroken}.
+     */
+    private final AtomicBoolean connectFails = new AtomicBoolean(false);
+    /**
+     * What {@code isConnected()} reports. See {@link #ioBroken}.
+     */
+    private final AtomicBoolean connected = new AtomicBoolean(true);
+
     private void prepare() throws Exception {
+        Mockito.when(mockClient.isConnected()).thenAnswer(inv -> connected.get());
+        Mockito.doAnswer(inv -> {
+            if (connectFails.get()) {
+                throw new RuntimeException("connection refused");
+            }
+            return null;
+        }).when(mockClient).connect();
         Mockito.doAnswer(invocationOnMock -> {
+            if (ioBroken.get()) {
+                throw new RuntimeException("connection dead");
+            }
             int unitId = invocationOnMock.getArgument(0, Integer.class);
             ReadHoldingRegistersRequest req = invocationOnMock.getArgument(1
                     , ReadHoldingRegistersRequest.class);
@@ -103,6 +130,9 @@ public class AlfenModbusClientTest {
             return new ReadHoldingRegistersResponse(makeRegisters(unitId, req));
         }).when(mockClient).readHoldingRegisters(Mockito.anyInt(), Mockito.any());
         Mockito.doAnswer(invocation -> {
+            if (ioBroken.get()) {
+                throw new RuntimeException("connection dead");
+            }
             LOG.info("Writing holding register");
             return new WriteMultipleRegistersResponse(123, 1);
         }).when(mockClient).writeMultipleRegisters(anyInt(), any());
@@ -221,7 +251,9 @@ public class AlfenModbusClientTest {
 
         //setting mode to PV_AND_MIN will enable the power to 6A and 1 phase
         //the writer starts in OFF, so there may be some 0A (disabled) writes before the mode arrives
-        verify(mockClient, timeout(10_000)).writeMultipleRegisters(anyInt(), ArgumentMatchers.argThat(r ->
+        //(atLeastOnce: the controller re-applies the state every interval, so the phases register
+        //keeps being rewritten until a poll has seen the new phase count)
+        verify(mockClient, timeout(10_000).atLeastOnce()).writeMultipleRegisters(anyInt(), ArgumentMatchers.argThat(r ->
                 r.address() == ModbusConst.ITEM_NUM_PHASES.start()));
         ArgumentCaptor<WriteMultipleRegistersRequest> argumentCaptor = ArgumentCaptor.forClass(WriteMultipleRegistersRequest.class);
         verify(mockClient, atLeast(2)).writeMultipleRegisters(anyInt(), argumentCaptor.capture());
@@ -265,6 +297,69 @@ public class AlfenModbusClientTest {
         //writes happen asynchronously on the modbus thread; the disable must end up writing 0A
         verify(mockClient, timeout(5_000).atLeastOnce()).writeMultipleRegisters(anyInt(), ArgumentMatchers.argThat(r ->
                 r.address() == ModbusConst.ITEM_MAX_CURRENT.start() && ByteBuffer.wrap(r.values()).getFloat() == 0f));
+    }
+
+    @Test
+    void testReconnectsAfterConsecutiveIoFailures() throws Exception {
+        prepare();
+        alfenModbusClient.start(true);
+        // healthy: discovery done, polling
+        verify(mqttPublisher, timeout(10_000)).sendDiscovery(any());
+        verify(mockClient, timeout(10_000).atLeast(2)).readHoldingRegisters(anyInt(), any());
+
+        // the connection dies (half-open: reads AND writes fail)
+        ioBroken.set(true);
+
+        // The client must force a reconnect instead of quitting. The test JVM staying alive is
+        // itself the assertion: the old code called Quarkus.asyncExit after 3 read errors, which
+        // stopped the keep-alive writes and put the charger in safe mode.
+        verify(mockClient, timeout(20_000).atLeast(2)).disconnect();
+        verify(mockClient, timeout(20_000).atLeast(2)).connect();
+        // the poll loop and the keep-alive writes keep running while the connection is down
+        verify(mockClient, timeout(20_000).atLeast(10)).readHoldingRegisters(anyInt(), any());
+        verify(mockClient, timeout(20_000).atLeast(3)).writeMultipleRegisters(anyInt(), any());
+    }
+
+    @Test
+    void testRecoversAfterConnectionReturns() throws Exception {
+        prepare();
+        alfenModbusClient.start(true);
+        verify(mqttPublisher, timeout(10_000)).sendDiscovery(any());
+
+        // connection dies
+        ioBroken.set(true);
+        verify(mockClient, timeout(20_000).atLeast(2)).disconnect();
+
+        // connection is back
+        ioBroken.set(false);
+        clearInvocations(mockClient, mqttPublisher);
+
+        // polls and keep-alive writes resume
+        verify(mqttPublisher, timeout(20_000).atLeast(4)).sendModbus(any(), any(), any(), anyInt());
+        verify(mockClient, timeout(20_000).atLeast(3)).writeMultipleRegisters(anyInt(), any());
+    }
+
+    @Test
+    void testRetriesConnectAndDiscoveryWhenChargerUnreachableAtStartup() throws Exception {
+        // charger unreachable at startup: connect fails, reads fail
+        prepare();
+        connectFails.set(true);
+        connected.set(false);
+        ioBroken.set(true);
+
+        alfenModbusClient.start(true);
+
+        // the application keeps retrying instead of giving up (or exiting)
+        verify(mockClient, timeout(15_000).atLeast(2)).connect();
+
+        // charger comes back
+        connectFails.set(false);
+        connected.set(true);
+        ioBroken.set(false);
+
+        // discovery (writers) is created once the charger is reachable, polls succeed
+        verify(mqttPublisher, timeout(15_000)).sendDiscovery(any());
+        verify(mockClient, timeout(15_000).atLeast(2)).readHoldingRegisters(anyInt(), any());
     }
 
     @Test
