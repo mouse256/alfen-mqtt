@@ -87,15 +87,14 @@ public interface WriterConfig {
     int threePhaseMargin();
 
     /**
-     * In PV_ONLY mode: charging may start when the grid would still export at least this many W
-     * with the car charging at minimum current (single phase).
+     * In PV_ONLY mode: charging may start when more than this many W are exported to the grid
+     * (raw grid export, per spec: "even if that means importing the rest from the grid").
      */
     @WithDefault("500")
     int solarStartPower();
 
     /**
-     * In PV_ONLY mode: charging stops when the grid would import more than this many W with the
-     * car charging at minimum current (single phase).
+     * In PV_ONLY mode: charging stops when the actual import from the grid exceeds this many W.
      */
     @WithDefault("1000")
     int solarStopPower();

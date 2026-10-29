@@ -1,12 +1,13 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+# Agent Instructions for alfen-mqtt
 
 ## Important information
 
-No guessing. If something is unclear, ask for user input to clarify the question.
-Make sure the specification is clear before doing an implementation.
-If a new feature is added, update CLAUDE.md
+- **No guessing.** If something is unclear, ask for user input to clarify before implementing.
+- Make sure the specification is clear before doing an implementation.
+- If a new feature is added, update this file (AGENTS.md).
+
+Specs are in the folder `spec`. The info there is correct, it takes preference over this auto-generated file.
+It's not allowed to alter the files in the spec folder, they are manually created and read-only for AI.
 
 ## Overview
 
@@ -44,6 +45,34 @@ MQTT topic ownership: only this app publishes state under `alfen/...`. Other too
 
 Notable flags: `writer.enabled` (starts the charging controller, the only thing that writes to the charger; default false), `writer.dry-run` (controller runs and publishes its status but no modbus writes are done; default false), `mqtt.enabled`, `auto.startup` (when false, `Main` skips wiring everything — used by tests), `discovery.uuid` (HA discovery device id).
 
+### Configuration Reference
+- `writer.min-current`: 6A (hardware minimum, controller must always send at least this)
+- `writer.max-current`: Maximum charge current per phase (default: 16A)
+- `writer.max-grid-power`: Maximum grid import budget in watts (default: 5000W)
+- `writer.solar-start-power`: PV_ONLY start threshold (default: 500W)
+- `writer.solar-stop-power`: PV_ONLY stop threshold (default: 1000W)
+
+## Requirements
+
+### Charger Hardware Constraints
+- **Minimum charge current**: The controller **must always send at least 6A** to the charger. This is a hard requirement.
+- All charging logic must respect this minimum. Never calculate or attempt to set a charge current below 6A.
+
+### PV_AND_MIN Mode Behavior
+- Must **charge whenever possible** with the following constraints:
+  - **Always send minimum 6A** to the charger
+  - **Do NOT start charging** if the grid import is already at/over `writer.max-grid-power` (spec: "unless the grid import is at capacity")
+  - When surplus is available: use all available power (charge at current proportional to surplus)
+  - When surplus < 1380W: still charge at 6A (will import the difference from grid)
+  - Hard limit: never exceed `writer.max-grid-power` from grid (enforced by the over-limit guard while charging)
+
+### Test Scenarios for PV_AND_MIN
+1. **Importing from grid (e.g., -1000W)**: Should charge at 6A
+2. **Importing heavily but below budget (e.g., -4000W with 7400W budget)**: Should charge at 6A
+3. **Importing at/over budget (e.g., -8000W with 7400W budget)**: Should NOT charge (grid at capacity)
+4. **Exporting a little (e.g., +200W)**: Should charge at 6A
+5. **Exporting a lot (e.g., +2000W)**: Should charge at 2000W/230V ≈ 8.7A
+
 ## Architecture
 
 `Main` is the CDI entrypoint: on `StartupEvent` it starts `MqttHandler`, then `AlfenModbus`, then `AlfenController` (and stops them in reverse). The two device modes are deliberately separate subsystems that share only the MQTT layer.
@@ -65,13 +94,13 @@ Inputs over MQTT:
 - **mode** on `alfen/set/<charger>/<socket>/mode` — one of `OFF`, `PV_ONLY` (only charge on solar surplus), `PV_AND_MIN` (always at least min current, faster on surplus), `FAST` (as fast as the grid budget allows), `SMART` (battery-level dependent, see below).
 - **grid power** on the configurable `writer.grid-consumed-topic` / `writer.grid-produced-topic` (payloads in kW). Net grid power is the only signal used; there is no separate solar input.
 
-The control loop (`update`, every `writer.interval`) computes `powerAvailable = (produced - consumed) + chargerDraw` (the solar surplus excluding the charger itself) and applies, in order: a stale-input guard (`writer.input-timeout`), an over-limit guard while charging (grid import above `writer.max-grid-power` for `writer.over-limit-delay` steps down: 3 phase → 1 phase immediately, bypassing the phase debounce, or stop + cooldown when already on 1 phase at minimum current), start/stop debounce (`writer.start-delay` only in `PV_ONLY`, `PV_AND_MIN`/`FAST` start right away; `writer.stop-delay`), a post-stop `writer.cooldown`, and target current/phase selection clamped to `[writer.min-current, writer.max-current]`. Phase count auto-switches 1↔3 (debounced by `writer.phase-switch-delay`) with hysteresis: up to 3 phase only when the budget covers the 3-phase minimum plus `writer.three-phase-margin`, back to 1 phase when it no longer covers the 3-phase minimum. `PV_ONLY` thresholds are evaluated against the grid power as it would be with the car charging at minimum current on 1 phase (`powerAvailable - min-current × 230`): it starts when that still exports at least `writer.solar-start-power` and stops when it imports more than `writer.solar-stop-power`. Controller status (`ControllerStatus`: mode, state, charging, targetCurrent, phases, timerEnd) is published to `alfen/controller/<charger>/<socket>` every interval. `state` (`ControllerState`) says what the controller is doing or waiting for: `OFF`, `STALE_INPUT`, `NO_MEASUREMENT`, `WAITING_FOR_SURPLUS`, `START_DELAY`, `COOLDOWN`, `CHARGING`, `STOP_DELAY`, `OVER_LIMIT`, `PHASE_SWITCH_DELAY`; `timerEnd` is the ISO-8601 instant the running timer of that state expires (null when none). State changes are logged once (`Controller <charger> (<socket>) mode <mode>: state <state> until <time> (<n>s)`), at WARN for `STALE_INPUT`/`NO_MEASUREMENT`, not every interval.
+The control loop (`update`, every `writer.interval`) computes `powerAvailable = (produced - consumed) + chargerDraw` (the solar surplus excluding the charger itself) and applies, in order: a stale-input guard (`writer.input-timeout`), a keep-alive write when no socket measurement is available (re-applies the current state so the charger doesn't enter safe mode), a start guard (don't start any mode when grid import is already at/over `writer.max-grid-power`), an over-limit guard while charging (grid import above `writer.max-grid-power` for `writer.over-limit-delay` steps down: 3 phase → 1 phase immediately, bypassing the phase debounce, or stop + cooldown when already on 1 phase at minimum current), start/stop debounce (`writer.start-delay` only in `PV_ONLY`, `PV_AND_MIN`/`FAST` start right away; `writer.stop-delay`), a post-stop `writer.cooldown`, and target current/phase selection clamped to `[writer.min-current, writer.max-current]`. Phase count auto-switches 1↔3 (debounced by `writer.phase-switch-delay`) with hysteresis: up to 3 phase only when the budget covers the 3-phase minimum plus `writer.three-phase-margin`, back to 1 phase when it no longer covers the 3-phase minimum. Per spec, `PV_ONLY` thresholds use raw grid power: it starts when the raw export (`powerAvailable` when not charging) is at least `writer.solar-start-power` — even if that means importing from the grid — and stops when the actual grid import (`-powerGrid`) exceeds `writer.solar-stop-power`. Controller status (`ControllerStatus`: mode, state, charging, targetCurrent, phases, timerEnd) is published to `alfen/controller/<charger>/<socket>` every interval. `state` (`ControllerState`) says what the controller is doing or waiting for: `OFF`, `STALE_INPUT`, `NO_MEASUREMENT`, `WAITING_FOR_SURPLUS`, `START_DELAY`, `COOLDOWN`, `CHARGING`, `STOP_DELAY`, `OVER_LIMIT`, `PHASE_SWITCH_DELAY`; `timerEnd` is the ISO-8601 instant the running timer of that state expires (null when none). State changes are logged once (`Controller <charger> (<socket>) mode <mode>: state <state> until <time> (<n>s)`), at WARN for `STALE_INPUT`/`NO_MEASUREMENT`, not every interval.
 
 The charge mode is kept in memory but published **retained** on `alfen/controller/<charger>/<socket>/mode` whenever a mode command arrives. The writer subscribes to that topic and restores the mode from it at startup (default `OFF` when nothing is retained); once a mode command was received the retained value is ignored, so our own echoed publishes never override a newer command.
 
 Home Assistant discovery (`AlfenModbusClient.sendDiscovery`) adds per socket, next to the measurement sensors: a `select` "Charge mode" (command `alfen/set/...`, state from the retained mode topic), a `binary_sensor` "Controller charging" and sensors "Controller target current"/"Controller phases"/"Controller state"/"Controller timer end" (timestamp) from the status JSON. These use their own `state_topic`, overriding the device-level one. `Select` and `BinarySensor` live in the sibling `homeassistant-discovery` library. Topic names come from the static helpers `AlfenModbusWriter.modeCommandTopic`/`modeStateTopic`/`statusTopic`.
 
-**SMART mode** uses the battery level from `SocEstimator` (passed to the writer as a `Supplier<Optional<Double>>`, empty when the estimator isn't configured or has no car value yet). `allowedImport(soc)` is `writer.smart-grid-import-low` (default 1000 W) up to `writer.smart-min-soc` (default 40%), `writer.smart-grid-import-high` (default 0 W) at 100%, linear in between. Below min-soc it always charges without start delay (like `PV_AND_MIN`) with budget `powerAvailable + smart-grid-import-low`. Above it, it is solar driven with start delay: start when `gridAtMin = powerAvailable - min-current × 230 ≥ -allowedImport`, stop (after stop-delay) when `gridAtMin < -allowedImport - writer.smart-stop-hysteresis` (default 500 W), budget `powerAvailable + allowedImport`. With an unknown battery level it behaves exactly like `PV_ONLY`. Sub-phase changes (unknown / below minimum / solar) are logged once. The status JSON also carries `soc` and `allowedGridImport` (only in SMART), discovered as "Controller allowed grid import".
+**SMART mode** uses the battery level from `SocEstimator` (passed to the writer as a `Supplier<Optional<Double>>`, empty when the estimator isn't configured or has no car value yet). `allowedImport(soc)` is `writer.smart-grid-import-low` (default 1000 W) up to `writer.smart-min-soc` (default 40%), `writer.smart-grid-import-high` (default 0 W) at 100%, linear in between. Below min-soc it always charges without start delay, with budget `powerAvailable` — same as `PV_AND_MIN` (spec: "same as the PV_AND_MIN mode"). Above it, it is solar driven with start delay: start when `gridAtMin = powerAvailable - min-current × 230 ≥ -allowedImport`, stop (after stop-delay) when `gridAtMin < -allowedImport - writer.smart-stop-hysteresis` (default 500 W), budget `powerAvailable + allowedImport`. With an unknown battery level it behaves exactly like `PV_ONLY`. Sub-phase changes (unknown / below minimum / solar) are logged once. The status JSON also carries `soc` and `allowedGridImport` (only in SMART), discovered as "Controller allowed grid import".
 
 All time-based decisions use an injectable `Supplier<Instant>` clock so `AlfenModbusWriterTest` can drive them with simulated time.
 
@@ -87,3 +116,12 @@ Tests are `@QuarkusTest`-based and use `@QuarkusTestResource` to stand up mock d
 - `TestMqttServer` / `MqttTestResource` — embedded MQTT broker.
 
 Tests typically disable `auto.startup` (via a `@TestProfile`) and start the subsystem under test manually in `@BeforeEach`.
+
+When modifying charging logic:
+- Ensure all modes (PV_ONLY, PV_AND_MIN, FAST, SMART, OFF) are tested
+- Verify that the minimum 6A constraint is always respected for PV_AND_MIN
+- Verify that PV_AND_MIN does NOT start charging when grid import is at/over `writer.max-grid-power` (spec: "unless the grid import is at capacity")
+- Verify that PV_AND_MIN DOES start charging when importing below `writer.max-grid-power` (spec: "charge at least at 6A all the time")
+- Verify PV_ONLY starts on raw export > `solar-start-power` (even if it means grid import) and stops on actual import > `solar-stop-power`
+- Verify keep-alive: a modbus write happens every interval even when socket measurement is missing
+- Test edge cases: zero surplus, small surplus (< 1380W), large surplus (> maxCurrent * 230)
