@@ -449,13 +449,11 @@ public class AlfenModbusWriter implements AutoCloseable {
         return switch (mode) {
             case PV_ONLY, PV_AND_MIN -> powerAvailable;
             case FAST -> config.maxGridPower() + powerAvailable;
-            // SMART below min-soc: same budget as PV_AND_MIN (spec: "same as the PV_AND_MIN mode").
-            // SMART in the solar phase: surplus plus the allowed grid import.
-            // SMART with unknown battery: same as PV_ONLY.
-            case SMART -> switch (smartPhase()) {
-                case BELOW_MIN, UNKNOWN -> powerAvailable;
-                case SOLAR -> powerAvailable + allowedImport(currentSoc.get());
-            };
+            // SMART: all sub-phases charge on the solar surplus only (spec: below min-soc "same as
+            // PV_AND_MIN", above it "PV_ONLY alike"). The allowed grid import only relaxes the
+            // start/stop thresholds, it is not added to the budget — otherwise the controller
+            // would deliberately target importing power from the grid while charging.
+            case SMART -> powerAvailable;
             case OFF -> 0;
         };
     }

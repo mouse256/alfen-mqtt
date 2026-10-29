@@ -656,8 +656,40 @@ public class AlfenModbusWriterTest {
         advance(config.startDelay().plusSeconds(1));
         grid(980);
         tick();
-        // budget = 980 + 500
-        verifySetState(1480 / 230.0, 1);
+        // Budget = surplus only (PV_ONLY alike, spec). 980W / 230V = 4.26A, clamped to 6A minimum.
+        // The allowed grid import (500W) only relaxes the start/stop thresholds, it is NOT added
+        // to the budget — otherwise the controller would deliberately import from the grid.
+        verifySetState(6, 1);
+    }
+
+    @Test
+    public void testSmartSolarChargesOnSurplusOnly() {
+        // Regression test: SMART above min-soc must be "PV_ONLY alike" (spec). The allowed grid
+        // import only relaxes the start/stop thresholds; it must NOT be added to the charge budget.
+        // At 68% SOC allowedImport ≈ 533W; with 1200W surplus the old code targeted
+        // (1200+533)/230 = 7.5A (~1725W, ~500W grid import) instead of the 6A minimum (1380W).
+        soc = 68.0;
+        setMode("SMART");
+        grid(1200);
+        tick();
+        verifyDisabled();
+        assertThat(lastStatus().state(), equalTo("START_DELAY"));
+
+        advance(config.startDelay().plusSeconds(1));
+        grid(1200);
+        tick();
+        // Budget = 1200W (surplus only) → 5.2A → clamped to 6A minimum.
+        verifySetState(6, 1);
+
+        // With more surplus the car charges faster, consuming the surplus (PV_ONLY alike).
+        grid(2000);
+        tick();
+        verifySetState(2000 / 230.0, 1);
+
+        // Dropping back to a small surplus returns to the 6A minimum.
+        grid(1200);
+        tick();
+        verifySetState(6, 1);
     }
 
     @Test
