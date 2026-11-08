@@ -40,6 +40,8 @@ public class AlfenModbusWriterTest {
     private Integer chargerPowerConsumed;
     private Double soc;
     private Instant now;
+    /** Vehicle connection state returned by the mocked client; null means Optional.empty() (unknown). */
+    private Boolean vehicleConnected;
 
     @BeforeEach
     public void beforeEach() {
@@ -52,6 +54,7 @@ public class AlfenModbusWriterTest {
         config = testConfig();
 
         soc = null;
+        vehicleConnected = null;
         writer = new AlfenModbusWriter(null, client, CHARGER_NAME, SOCKET, mqttHandler, config, () -> Optional.ofNullable(soc), clock);
 
         listenerSet = registerMock("alfen/set/+/+/+");
@@ -60,6 +63,7 @@ public class AlfenModbusWriterTest {
         listenerModeState = registerMock(MODE_STATE_TOPIC);
 
         doAnswer(invocation -> Optional.ofNullable(chargerPowerConsumed)).when(client).getSocketRealPowerSum(SOCKET);
+        doAnswer(invocation -> Optional.ofNullable(vehicleConnected)).when(client).isVehicleConnected(SOCKET);
     }
 
     private WriterConfig testConfig() {
@@ -799,6 +803,90 @@ public class AlfenModbusWriterTest {
         verify(client).setState(eq(SOCKET), anyFloat(), eq(1));
         verify(client, never()).disable(SOCKET);
         assertThat(lastStatus().state(), equalTo("NO_MEASUREMENT"));
+    }
+
+    @Test
+    public void testVehicleNotConnectedDisablesCharging() {
+        vehicleConnected = false;
+        setMode("PV_AND_MIN");
+        grid(2000);
+        tick();
+        // Car not connected: no charging, NOT_CONNECTED state reported.
+        verifyDisabled();
+        AlfenModbusWriter.ControllerStatus status = lastStatus();
+        assertThat(status.state(), equalTo("NOT_CONNECTED"));
+        assertThat(status.charging(), equalTo(false));
+    }
+
+    @Test
+    public void testVehicleDisconnectStopsCharging() {
+        vehicleConnected = true;
+        startCharging("PV_AND_MIN", 2000);
+        assertThat(lastStatus().state(), equalTo("CHARGING"));
+
+        // Car is unplugged mid-charge.
+        vehicleConnected = false;
+        tick();
+        verifyDisabled();
+        AlfenModbusWriter.ControllerStatus status = lastStatus();
+        assertThat(status.state(), equalTo("NOT_CONNECTED"));
+        assertThat(status.charging(), equalTo(false));
+    }
+
+    @Test
+    public void testVehicleReconnectResumesCharging() {
+        vehicleConnected = false;
+        setMode("PV_AND_MIN");
+        grid(2000);
+        tick();
+        verifyDisabled();
+        assertThat(lastStatus().state(), equalTo("NOT_CONNECTED"));
+
+        // Car is plugged in: charging resumes (PV_AND_MIN starts immediately, no start delay).
+        vehicleConnected = true;
+        tick();
+        verify(client).setState(eq(SOCKET), anyFloat(), eq(1));
+        assertThat(lastStatus().state(), equalTo("CHARGING"));
+    }
+
+    @Test
+    public void testVehicleNotConnectedNoCooldownOnReconnect() {
+        // Unplugging must not trigger a cooldown: when the car reconnects, charging should
+        // be able to start immediately (no COOLDOWN state in between).
+        vehicleConnected = true;
+        startCharging("PV_ONLY", 2000);
+
+        vehicleConnected = false;
+        tick();
+        assertThat(lastStatus().state(), equalTo("NOT_CONNECTED"));
+
+        // Reconnect: PV_ONLY needs the start delay, but no cooldown first.
+        vehicleConnected = true;
+        tick();
+        AlfenModbusWriter.ControllerStatus status = lastStatus();
+        assertThat(status.state(), equalTo("START_DELAY"));
+    }
+
+    @Test
+    public void testVehicleUnknownConnectionProceedsNormally() {
+        // Optional.empty() (unknown connection state) must not block charging.
+        vehicleConnected = null;
+        setMode("PV_AND_MIN");
+        grid(2000);
+        tick();
+        verify(client).setState(eq(SOCKET), anyFloat(), eq(1));
+        assertThat(lastStatus().state(), equalTo("CHARGING"));
+    }
+
+    @Test
+    public void testVehicleNotConnectedInOffModeReportsOff() {
+        // OFF takes priority over NOT_CONNECTED: the user explicitly turned charging off.
+        vehicleConnected = false;
+        setMode("OFF");
+        grid(2000);
+        tick();
+        verifyDisabled();
+        assertThat(lastStatus().state(), equalTo("OFF"));
     }
 
     @Test
